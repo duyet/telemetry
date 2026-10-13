@@ -2,6 +2,8 @@ import { MAX_PROPS, type TelemetryEvent } from "./types.ts";
 
 /** Analytics Engine dataset name; must match cloudflare.config.ts. */
 export const DATASET = "telemetry_events";
+/** Table reference used in AE SQL FROM clauses. May change after the binding spike. */
+export const TABLE = DATASET;
 
 /**
  * Blob layout of one data point. index1 = project slug, double1 = n.
