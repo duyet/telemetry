@@ -1,9 +1,7 @@
-import { BLOB, lit, PROP_BLOBS, sql, TABLE } from "./ae.ts";
+import { BLOB, dayRange, EVENTS, lit, PROP_BLOBS, sql, TABLE, USERS } from "./ae.ts";
 import { type Bindings, type DailyRow, type Dims, TOP_N } from "./types.ts";
 import { addDays, utcDay } from "./util.ts";
 
-const USERS = "count(DISTINCT blob2)";
-const EVENTS = "sum(_sample_interval * double1)";
 const DIM_BLOBS = Object.entries(BLOB).filter(([name]) => name !== "uid") as [string, string][];
 /** D1 allows 100 bound parameters per statement; a row binds 7 (source is a literal). */
 const ROWS_PER_STATEMENT = 14;
@@ -30,7 +28,7 @@ export function topDims(dims: Dims): Dims {
 }
 
 function window(from: string, to: string, project?: string): string {
-	const range = `timestamp >= toDateTime(${lit(`${from} 00:00:00`)}) AND timestamp < toDateTime(${lit(`${to} 00:00:00`)})`;
+	const range = dayRange(from, to);
 	return project ? `${range} AND index1 = ${lit(project)}` : range;
 }
 

@@ -228,7 +228,7 @@ test("rollup defaults to yesterday and only queries the project it was asked for
 	const res = await rollupCall(t, token);
 	expect(await res.json()).toEqual({ projects: 1 });
 	expect(t.analytics.queries.every((q) => q.includes("index1 = 'demo'"))).toBe(true);
-	expect(t.analytics.queries[0]).toContain(`toDateTime('${day(1)} 00:00:00')`);
+	expect(t.analytics.queries[0]).toContain(`timestamp >= '${day(1)}T00:00:00Z'`);
 	expect(daily(t)).toHaveLength(1);
 });
 

@@ -1,4 +1,4 @@
-import { lit, sql, TABLE } from "./ae.ts";
+import { dayRange, EVENTS, lit, sql, TABLE, USERS } from "./ae.ts";
 import { addToDims, topDims } from "./rollup.ts";
 import type { Bindings, Dims, Stats } from "./types.ts";
 import { addDays, utcDay } from "./util.ts";
@@ -32,8 +32,7 @@ async function liveToday(env: Bindings, slug: string, today: string): Promise<To
 	try {
 		const [row] = await sql(
 			env.ANALYTICS,
-			`SELECT count(DISTINCT blob2) AS users, sum(_sample_interval * double1) AS events FROM ${TABLE}
-			WHERE index1 = ${lit(slug)} AND timestamp >= toDateTime(${lit(`${today} 00:00:00`)})`,
+			`SELECT ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE index1 = ${lit(slug)} AND ${dayRange(today)}`,
 		);
 		const live = { users: Number(row?.users ?? 0), events: Number(row?.events ?? 0) };
 		todayCache.set(slug, { at: Date.now(), today: live });

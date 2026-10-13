@@ -31,7 +31,7 @@ client ──POST /<project>──▶ Worker ──▶ Analytics Engine   raw ev
 ## Quickstart (60 seconds)
 
 ```sh
-BASE=https://telemetry.duyet.workers.dev   # or your own deployment
+BASE=https://telemetry.anyr.workers.dev   # or your own deployment
 
 # 1. create a project. Save admin_token: it is shown once.
 curl -X POST $BASE/api/projects -H 'content-type: application/json' \
@@ -52,7 +52,7 @@ curl $BASE/api/my-tool/stats
 Create a project, then paste this into Claude Code, Codex or any coding agent:
 
 ```
-Add anonymous usage telemetry to this repo. Follow https://telemetry.duyet.workers.dev/<project>/install.md exactly. Respect DO_NOT_TRACK, add an opt-out env var and a Telemetry section to the README, never send PII, never block the main path.
+Add anonymous usage telemetry to this repo. Follow https://telemetry.anyr.workers.dev/<project>/install.md exactly. Respect DO_NOT_TRACK, add an opt-out env var and a Telemetry section to the README, never send PII, never block the main path.
 ```
 
 The playbook at `/<project>/install.md` has the exact endpoint, a snippet for your language, the opt-out rules, a test to add and a README template. There is also a Claude Code skill in [`skills/add-telemetry`](skills/add-telemetry/SKILL.md). With no project yet, point the agent at `/AGENTS.md`.

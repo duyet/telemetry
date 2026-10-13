@@ -5,7 +5,7 @@ description: Add anonymous usage telemetry (analytics, a phone-home, install or 
 
 # Add telemetry to a project
 
-Adds anonymous usage telemetry that reports to a telemetry service (https://github.com/duyet/telemetry). Default base URL: `https://telemetry.duyet.workers.dev`. This is a placeholder. Use the user's own deployment URL if they give one, and ask if unsure.
+Adds anonymous usage telemetry that reports to a telemetry service (https://github.com/duyet/telemetry). Default base URL: `https://telemetry.anyr.workers.dev`. This is a placeholder. Use the user's own deployment URL if they give one, and ask if unsure.
 
 In this file `BASE` is the base URL and `<project>` is the project slug.
 

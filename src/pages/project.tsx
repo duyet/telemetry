@@ -207,7 +207,7 @@ function Breakdown({ dim, rows }: { dim: string; rows: [string, number, number][
 						{rows.map(([value, users, events]) => (
 							<tr>
 								<td>
-									{value || <span class="muted">(empty)</span>}
+									{(dim === "country" ? value.toUpperCase() : value) || <span class="muted">(empty)</span>}
 									<i class="bar" style={`width:${pct(events, total)}%`} aria-hidden="true"></i>
 								</td>
 								<td class="n num" title={full(users)}>

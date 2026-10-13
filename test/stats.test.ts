@@ -97,7 +97,7 @@ test("today comes from one live AE query filtered to the project", async () => {
 	expect(summary.today).toEqual({ users: 3, events: 8 });
 	expect(t.analytics.queries).toHaveLength(1);
 	expect(t.analytics.queries[0]).toContain("index1 = 'demo'");
-	expect(t.analytics.queries[0]).toContain(`toDateTime('${utcDay()} 00:00:00')`);
+	expect(t.analytics.queries[0]).toContain(`timestamp >= '${utcDay()}T00:00:00Z'`);
 });
 
 test("stats still render from D1 when Analytics Engine fails, because a broken AE must not take the page down", async () => {

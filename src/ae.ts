@@ -2,8 +2,13 @@ import { MAX_PROPS, type TelemetryEvent } from "./types.ts";
 
 /** Analytics Engine dataset name; must match cloudflare.config.ts. */
 export const DATASET = "telemetry_events";
-/** Table reference used in AE SQL FROM clauses. May change after the binding spike. */
-export const TABLE = DATASET;
+/**
+ * AE SQL as the `analytics` binding speaks it (the unified SQL API, checked against production):
+ * schema-qualified table, `"sampleInterval"` for sampling, ISO 8601 timestamps with a zone.
+ */
+export const TABLE = `events.analyticsEngine."${DATASET}"`;
+export const USERS = "count(DISTINCT blob2)";
+export const EVENTS = `sum("sampleInterval" * double1)`;
 
 /**
  * Blob layout of one data point. index1 = project slug, double1 = n.
@@ -48,4 +53,10 @@ export async function sql<T extends Record<string, unknown>>(
 /** Quote a string literal for AE SQL. Only for values already validated (slugs, days). */
 export function lit(s: string): string {
 	return `'${s.replaceAll("'", "''")}'`;
+}
+
+/** `timestamp` filter for [from, to) in UTC days; `to` omitted means open-ended. */
+export function dayRange(from: string, to?: string): string {
+	const start = `timestamp >= ${lit(`${from}T00:00:00Z`)}`;
+	return to ? `${start} AND timestamp < ${lit(`${to}T00:00:00Z`)}` : start;
 }

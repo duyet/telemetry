@@ -26,8 +26,8 @@ function ae(f: Fixture) {
 	return (q: string): Rows => {
 		const blob = /(blob\d+) AS v/.exec(q)?.[1];
 		if (blob) return f.byBlob?.[blob] ?? [];
-		if (q.includes(`'${MONTH_START} 00:00:00'`)) return month;
-		if (q.includes(`'${WEEK_START} 00:00:00'`)) return week;
+		if (q.includes(`'${MONTH_START}T00:00:00Z'`)) return month;
+		if (q.includes(`'${WEEK_START}T00:00:00Z'`)) return week;
 		return f.day ?? [];
 	};
 }
