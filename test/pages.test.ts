@@ -180,7 +180,7 @@ test("landing page lists projects and has the create form", () => {
 	expect(html).toContain("Demo CLI");
 	expect(html).toContain('href="/other">other</a>');
 	expect(html).toContain("Jan 5, 2026");
-	expect(html).toContain('<form id="create"');
+	expect(html).toContain('<form id="create-form"');
 	expect(html).toContain('pattern="^[a-z0-9][a-z0-9-]{1,38}$"');
 	for (const f of ["slug", "name", "description", "homepage"]) expect(html).toContain(`<label for="${f}">`);
 	expect(html).toContain('"/api/projects"');
@@ -195,7 +195,7 @@ test("landing route renders even if the registry query fails", async () => {
 	const res = await call(app, env, "/");
 	expect(res.status).toBe(200);
 	const html = await res.text();
-	expect(html).toContain('<form id="create"');
+	expect(html).toContain('<form id="create-form"');
 	expect(html).toContain('id="projects"');
 });
 
@@ -218,4 +218,16 @@ test("compact number formatting", () => {
 	expect(compact(12345)).toBe("12.3k");
 	expect(compact(123456)).toBe("123k");
 	expect(compact(1234567)).toBe("1.2M");
+});
+
+test("element ids are unique on every page, since the inline scripts find elements by id", () => {
+	const pages = [
+		renderProject(fixtureStats(30)),
+		String(LandingView({ base: BASE, projects: [project] })),
+		String(DocsView({ base: BASE })),
+	];
+	for (const html of pages) {
+		const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+		expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
+	}
 });

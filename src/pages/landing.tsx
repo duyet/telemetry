@@ -20,7 +20,7 @@ export async function landingPage(c: Ctx) {
 }
 
 const CREATE_SCRIPT = `
-var f=document.getElementById("create"),out=document.getElementById("created"),err=document.getElementById("create-error");
+var f=document.getElementById("create-form"),out=document.getElementById("created"),err=document.getElementById("create-error");
 function put(id,v){var el=document.getElementById(id);if(el)el.textContent=v}
 function link(id,v){var el=document.getElementById(id);if(el){el.href=v;el.textContent=v}}
 f.addEventListener("submit",function(e){e.preventDefault();err.hidden=true;var btn=f.querySelector("button[type=submit]");btn.disabled=true;
@@ -78,7 +78,7 @@ export function LandingView({ base, projects }: { base: string; projects: Projec
 
 			<h2 id="create">Create a project</h2>
 			<div class="card">
-				<form id="create" data-prompt={promptTemplate} autocomplete="off">
+				<form id="create-form" data-prompt={promptTemplate} autocomplete="off">
 					<div class="field">
 						<label for="slug">Slug</label>
 						<input type="text" id="slug" name="slug" required pattern="^[a-z0-9][a-z0-9-]{1,38}$" placeholder="my-cli" />
