@@ -1,0 +1,25 @@
+{
+	"name": "telemetry",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "cf dev",
+		"build": "cf build",
+		"deploy": "cf deploy",
+		"test": "bun test",
+		"typecheck": "cf workers types && tsc"
+	},
+	"devDependencies": {
+		"@cloudflare/vite-plugin": "beta",
+		"@types/bun": "^1.4.3",
+		"cf": "1.0.0-beta.16",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.0"
+	},
+	"dependencies": {
+		"hono": "4.13.13",
+		"marked": "^18.1.1"
+	},
+	"description": "Free, self-hosted usage telemetry for open-source projects on Cloudflare Workers + Analytics Engine + D1",
+	"license": "MIT"
+}
