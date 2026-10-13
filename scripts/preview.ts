@@ -3,9 +3,8 @@
  *   bun scripts/preview.ts   →  http://localhost:8788
  */
 import { app } from "../src/index.ts";
-import { LandingView } from "../src/pages/landing.tsx";
-import type { Dims, Project, RegistryEntry } from "../src/types.ts";
-import { addDays, baseUrl, utcDay } from "../src/util.ts";
+import type { Dims } from "../src/types.ts";
+import { addDays, utcDay } from "../src/util.ts";
 import { makeEnv } from "../test/fakes.ts";
 
 const PORT = Number(process.env.PORT ?? 8788);
@@ -104,29 +103,6 @@ for (const p of PROJECTS) {
 	}
 }
 
-/**
- * What `queryRegistry` returns once the backend lands: active projects with 30 closed days of DAU.
- * Built here from the seeded `daily` rows so the landing page shows sparklines in the preview.
- */
-function registry(): RegistryEntry[] {
-	const since = addDays(today, -30);
-	const rows = db.sqlite
-		.query<Project, [string]>(
-			"SELECT p.slug, p.name, p.description, p.homepage, p.created_at FROM projects p WHERE EXISTS (SELECT 1 FROM daily d WHERE d.project = p.slug AND d.day >= ?) ORDER BY p.created_at DESC",
-		)
-		.all(since);
-	return rows.map((p) => {
-		const byDay = new Map(
-			db.sqlite
-				.query<{ day: string; dau: number }, [string, string]>("SELECT day, dau FROM daily WHERE project = ? AND day >= ?")
-				.all(p.slug, since)
-				.map((r) => [r.day, r.dau]),
-		);
-		const series = Array.from({ length: 30 }, (_, i) => byDay.get(addDays(today, i - 30)) ?? 0);
-		return { ...p, series, dau: series[29] ?? 0 };
-	});
-}
-
 const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
 Bun.serve({
 	port: PORT,
@@ -134,11 +110,6 @@ Bun.serve({
 		const url = new URL(req.url);
 		// Static assets come from Cloudflare in production; serve the fonts here so the preview looks right.
 		if (url.pathname.startsWith("/fonts/")) return new Response(Bun.file(`public${url.pathname}`));
-		if (url.pathname === "/") {
-			return new Response(String(LandingView({ base: baseUrl(req), projects: registry() })), {
-				headers: { "content-type": "text/html; charset=utf-8" },
-			});
-		}
 		const headers = new Headers(req.headers);
 		headers.set("cf-connecting-ip", "203.0.113.7");
 		const r = new Request(req.url, { method: req.method, headers, body: req.body });
