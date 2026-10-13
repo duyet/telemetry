@@ -1,209 +1,208 @@
-import { raw } from "hono/html";
 import { agentPrompt } from "../docs/content.ts";
-import { queryProjects } from "../projects.ts";
-import type { Ctx, Project } from "../types.ts";
+import { queryRegistry } from "../projects.ts";
+import type { Ctx, RegistryEntry } from "../types.ts";
 import { baseUrl } from "../util.ts";
-import { fmtDate } from "./format.ts";
-import { CodeBlock, Layout, REPO } from "./layout.tsx";
+import { Sparkline } from "./charts.tsx";
+import { compact, full } from "./format.ts";
+import { CodeBlock, GITHUB_ICON, LANDING_CSS, Layout, Masthead, MastheadLine, REPO, Rules, Section, type TocEntry } from "./layout.tsx";
 
-/** Owner: agent C. */
+/** Owner: frontend agent. */
 export async function landingPage(c: Ctx) {
 	const base = baseUrl(c.req.raw);
-	let projects: Project[] | null;
+	let projects: RegistryEntry[] | null;
 	try {
-		projects = await queryProjects(c.env.DB);
+		projects = await queryRegistry(c.env.DB);
 	} catch (err) {
-		console.error("queryProjects failed", err);
+		console.error("queryRegistry failed", err);
 		projects = null;
 	}
 	return c.html(<LandingView base={base} projects={projects} />);
 }
 
-const CREATE_SCRIPT = `
-var f=document.getElementById("create-form"),out=document.getElementById("created"),err=document.getElementById("create-error");
-function put(id,v){var el=document.getElementById(id);if(el)el.textContent=v}
-function link(id,v){var el=document.getElementById(id);if(el){el.href=v;el.textContent=v}}
-f.addEventListener("submit",function(e){e.preventDefault();err.hidden=true;var btn=f.querySelector("button[type=submit]");btn.disabled=true;
-var body={};new FormData(f).forEach(function(v,k){if(v)body[k]=v});
-fetch("/api/projects",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}).then(function(r){
-return r.json().catch(function(){return {}}).then(function(j){
-if(!r.ok){err.textContent=j.error||(r.status===409?"That slug is already taken.":r.status===429?"Too many projects created from this address today. Try again tomorrow.":r.status===400?"Check the fields and try again.":"Request failed ("+r.status+").");err.hidden=false;return}
-var base=location.origin,s=j.slug;
-put("r-token",j.admin_token||"");put("r-url",j.ingest_url||base+"/"+s);put("r-prompt",f.getAttribute("data-prompt").split("{slug}").join(s));
-link("r-page",base+"/"+s);link("r-install",base+"/"+s+"/install.md");
-f.hidden=true;out.hidden=false;out.scrollIntoView({block:"start"})})
-}).catch(function(){err.textContent="Network error. Try again.";err.hidden=false}).then(function(){btn.disabled=false})});
-`.trim();
+export const LANDING_TOC: TocEntry[] = [
+	{ id: "how", label: "How it works" },
+	{ id: "events", label: "Send events" },
+	{ id: "otlp", label: "OpenTelemetry" },
+	{ id: "agent", label: "With an agent" },
+	{ id: "projects", label: "Projects" },
+	{ id: "self-host", label: "Self-host" },
+	{ id: "privacy", label: "Privacy" },
+];
 
-export function LandingView({ base, projects }: { base: string; projects: Project[] | null }) {
-	const promptTemplate = agentPrompt(base, "{slug}");
+/** At most this many tiles in the masthead strip. */
+export const STRIP_MAX = 5;
+
+export function LandingView({ base, projects }: { base: string; projects: RegistryEntry[] | null }) {
+	const count = projects?.length ?? 0;
+	const strip = (projects ?? []).slice(0, STRIP_MAX);
 	return (
 		<Layout
-			title="telemetry · usage telemetry for open-source projects"
-			description="Free, self-hosted, privacy-first usage telemetry for CLIs, desktop apps, web and OTLP. Runs on Cloudflare Workers."
+			title="telemetry · usage analytics for open source"
+			description="Free, self-hosted usage telemetry for CLIs, desktop apps, web pages and OTLP. One POST creates the project. Runs on Cloudflare Workers."
+			toc={LANDING_TOC}
+			current="home"
+			css={LANDING_CSS}
 		>
-			<h1>Usage telemetry for open-source projects</h1>
-			<p class="lead">Free, self-hosted and privacy-first. Works for CLIs, desktop apps, web pages and anything that speaks OTLP.</p>
-			<p class="row" style="margin-top:20px">
-				<a class="btn primary" href="#create">
-					Create a project
-				</a>
-				<a href="/docs">Read the API docs</a>
-			</p>
+			<Masthead
+				name="telemetry"
+				tagline="usage analytics for open source"
+				icons={[{ href: REPO, label: "telemetry on GitHub", svg: GITHUB_ICON }]}
+			>
+				<p class="statement">
+					Send one POST from your app and see <em>who uses it</em>. No sign-up: the first event creates the project.
+				</p>
+				<Strip projects={strip} unavailable={projects === null} />
+				<MastheadLine
+					items={[
+						"/telemetry",
+						<a href="#projects">
+							{count === 1 ? "1 project, public" : `${count} projects, all public`}
+						</a>,
+						<a href="https://duyet.net">by duyet</a>,
+						"MIT",
+						<a href="#self-host">Self-host ↓</a>,
+					]}
+				/>
+			</Masthead>
 
-			<h2>How it works</h2>
-			<div class="steps">
-				<div class="step">
-					<h3>Create a project</h3>
-					<p class="small muted">Pick a slug. You get an admin token and an ingest URL. No account.</p>
-					<CodeBlock id="how-1" code={`curl -X POST ${base}/api/projects \\\n  -d '{"slug":"my-cli"}'`} />
-				</div>
-				<div class="step">
-					<h3>Send events</h3>
-					<p class="small muted">One POST per event. The id is a random string your client keeps; it is hashed on arrival.</p>
-					<CodeBlock
-						id="how-2"
-						code={`curl -X POST ${base}/my-cli \\\n  -d '{"event":"ping","id":"<random-id>","version":"1.0.0"}'`}
-					/>
-				</div>
-				<div class="step">
-					<h3>See usage</h3>
-					<p class="small muted">DAU, WAU, MAU, versions, platforms and countries on a public page, and as JSON.</p>
-					<CodeBlock id="how-3" code={`open ${base}/my-cli\ncurl ${base}/api/my-cli/stats?days=30`} />
-				</div>
+			<div class="lede">
+				<p>
+					Daily, weekly and monthly users, versions, platforms and countries, on a public page and as JSON. It works for
+					CLIs, desktop apps, web pages and anything that speaks OTLP, and runs inside the Cloudflare free plan.
+				</p>
 			</div>
 
-			<h2 id="projects">Projects</h2>
-			<Registry projects={projects} />
+			<Section id="how" index={1} title="How it works">
+				<ol class="steps">
+					<li>
+						<span>1</span>
+						<span>
+							Pick a slug: lowercase letters, digits and dashes, like <code>my-cli</code>.
+						</span>
+					</li>
+					<li>
+						<span>2</span>
+						<span>Send the first event. It creates the project and returns your admin token, once.</span>
+					</li>
+					<li>
+						<span>3</span>
+						<span>
+							Open <code>{base}/my-cli</code>.
+						</span>
+					</li>
+				</ol>
+				<CodeBlock
+					id="how-curl"
+					code={`curl -X POST ${base}/my-cli \\\n  -d '{"event":"ping","id":"<random-id>","version":"1.0.0"}'\n\n→ {"accepted":1,"dropped":0,"project":{"slug":"my-cli","created":true,\n    "admin_token":"tk_…","page_url":"${base}/my-cli"}}`}
+				/>
+				<p class="note">Save the admin token. It renames the project, rotates the token, and imports history.</p>
+			</Section>
 
-			<h2 id="create">Create a project</h2>
-			<div class="card">
-				<form id="create-form" data-prompt={promptTemplate} autocomplete="off">
-					<div class="field">
-						<label for="slug">Slug</label>
-						<input type="text" id="slug" name="slug" required pattern="^[a-z0-9][a-z0-9-]{1,38}$" placeholder="my-cli" />
-						<p class="hint">
-							Lowercase letters, digits and dashes, 2–39 characters: <code>^[a-z0-9][a-z0-9-]{"{1,38}"}$</code>
-						</p>
-					</div>
-					<div class="field">
-						<label for="name">Name</label>
-						<input type="text" id="name" name="name" maxlength={80} placeholder="My CLI" />
-					</div>
-					<div class="field">
-						<label for="description">Description</label>
-						<input type="text" id="description" name="description" maxlength={200} placeholder="What the project does" />
-					</div>
-					<div class="field">
-						<label for="homepage">Homepage</label>
-						<input type="url" id="homepage" name="homepage" placeholder="https://github.com/you/my-cli" />
-					</div>
-					<button type="submit" class="primary">
-						Create project
-					</button>
-					<p id="create-error" class="err" role="alert" hidden></p>
-				</form>
-				<div id="created" class="result" hidden>
-					<p class="warn">
-						<b>Save the admin token now.</b> It is shown once and never again. You need it to import history or delete the
-						project.
-					</p>
-					<dl>
-						<dt>Admin token</dt>
-						<dd class="code">
-							<button type="button" class="copy" data-copy="#r-token" aria-label="Copy admin token">
-								Copy
-							</button>
-							<pre>
-								<code id="r-token"></code>
-							</pre>
-						</dd>
-						<dt>Ingest URL</dt>
-						<dd class="code">
-							<button type="button" class="copy" data-copy="#r-url" aria-label="Copy ingest URL">
-								Copy
-							</button>
-							<pre>
-								<code id="r-url"></code>
-							</pre>
-						</dd>
-						<dt>Project page</dt>
-						<dd>
-							<a id="r-page" href="/"></a>
-						</dd>
-						<dt>Agent playbook</dt>
-						<dd>
-							<a id="r-install" href="/"></a>
-						</dd>
-						<dt>Agent prompt</dt>
-						<dd class="code">
-							<button type="button" class="copy" data-copy="#r-prompt" aria-label="Copy agent prompt">
-								Copy
-							</button>
-							<pre>
-								<code id="r-prompt"></code>
-							</pre>
-						</dd>
-					</dl>
-				</div>
-			</div>
-			<script>{raw(CREATE_SCRIPT)}</script>
+			<Section id="events" index={2} title="Send events">
+				<p>
+					One JSON object per event, or an array of up to 25. The <code>id</code> is a random string your client keeps; the
+					server hashes it with a secret salt and never stores it raw.
+				</p>
+				<Rules
+					rows={[
+						[<code>event</code>, "Required. A name like ping, run or build. Letters, digits, _ . : / and -, up to 64 characters."],
+						[<code>id</code>, "Random install id the client persists. With it, users are counted across days. Without it, daily users only."],
+						[<code>version</code>, "App version, up to 32 characters."],
+						[
+							<>
+								<code>os</code>, <code>arch</code>
+							</>,
+							"What the runtime reports: linux, darwin, windows; x64, arm64. Do not remap them.",
+						],
+						[<code>ci</code>, "true when the event came from a CI run."],
+						[<code>props</code>, "Up to 8 extra keys with short string, number or boolean values. Keep them categorical."],
+						[<code>n</code>, "Occurrence count, 1 to 1000. Default 1."],
+					]}
+				/>
+				<p class="note">
+					The country comes from Cloudflare. The IP and user agent are never stored. Full rules in the{" "}
+					<a href="/docs">API docs</a>.
+				</p>
+			</Section>
 
-			<h2>Add it with your coding agent</h2>
-			<p class="muted">
-				Every project page has a <b>Copy agent prompt</b> button and a <code>/&lt;project&gt;/install.md</code> playbook. Paste
-				the prompt into Claude Code, Codex or Cursor and the agent wires the client in, with opt-out and a README section.
-			</p>
-			<CodeBlock id="agent-example" code={agentPrompt(base, "my-cli")} wrap />
+			<Section id="otlp" index={3} title="OpenTelemetry">
+				<p>Any OpenTelemetry SDK or collector can send to the same project. Point it at the project URL with JSON encoding.</p>
+				<CodeBlock id="otlp-env" code={`export OTEL_EXPORTER_OTLP_ENDPOINT=${base}/my-cli\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/json`} />
+				<p class="note">
+					Logs, traces and metrics become events. Set <code>service.instance.id</code> as a resource attribute to count users.
+				</p>
+			</Section>
 
-			<h2>Self-host</h2>
-			<p class="muted">One Worker, one D1 database, one Analytics Engine dataset. The schema applies itself on first request.</p>
-			<CodeBlock id="selfhost" code={`git clone ${REPO} && cd telemetry && bun install && bunx cf deploy`} />
-			<p class="small muted">Enable Analytics Engine once in the Cloudflare dashboard (Workers &amp; Pages → Analytics Engine). Free tier covers it.</p>
+			<Section id="agent" index={4} title="With an agent">
+				<p>
+					Every project has a playbook at <code>/&lt;slug&gt;/install.md</code>. Paste this prompt into Claude Code, Codex or
+					Cursor and the agent wires the client in, with an opt-out env var and a Telemetry section in the README.
+				</p>
+				<CodeBlock id="agent-example" code={agentPrompt(base, "my-cli")} wrap />
+			</Section>
+
+			<Section id="projects" index={5} title="Projects">
+				<Registry projects={projects} />
+			</Section>
+
+			<Section id="self-host" index={6} title="Self-host">
+				<p>One Worker, one D1 database, one Analytics Engine dataset. The schema applies itself on first request.</p>
+				<CodeBlock id="selfhost" code={`git clone ${REPO} && cd telemetry && bun install && bunx cf deploy`} />
+				<p class="note">Enable Analytics Engine once in the Cloudflare dashboard, under Workers &amp; Pages. The free tier covers it.</p>
+			</Section>
+
+			<Section id="privacy" index={7} title="Privacy">
+				<p>Ids are hashed with a secret salt before they are stored, and the raw id is never written anywhere.</p>
+				<p>IP addresses and user agents are never stored. Raw events are deleted after 90 days; only daily counts stay.</p>
+				<p>Every project page and its JSON are public. Send nothing you would not publish as an aggregate.</p>
+			</Section>
+
+			<footer class="colophon">
+				<p>
+					Free, self-hosted on Cloudflare Workers. <a href={REPO}>Source</a> · <a href="/docs">API docs</a> ·{" "}
+					<a href="/llms.txt">llms.txt</a>
+				</p>
+			</footer>
 		</Layout>
 	);
 }
 
-function Registry({ projects }: { projects: Project[] | null }) {
-	if (projects === null) return <p class="empty">The registry is temporarily unavailable.</p>;
-	if (projects.length === 0)
-		return (
-			<p class="empty">
-				No projects yet. <a href="#create">Create the first one.</a>
-			</p>
-		);
+function Strip({ projects, unavailable }: { projects: RegistryEntry[]; unavailable: boolean }) {
+	if (unavailable) return <p class="masthead-empty">The registry is temporarily unavailable.</p>;
+	if (projects.length === 0) return <p class="masthead-empty">No active projects yet. The first event you send will appear here.</p>;
 	return (
-		<div class="tbl">
-			<table>
-				<thead>
-					<tr>
-						<th scope="col">Project</th>
-						<th scope="col">Description</th>
-						<th scope="col" class="n">
-							Created
-						</th>
-					</tr>
-				</thead>
-				<tbody>
-					{projects.map((p) => (
-						<tr>
-							<td>
-								<a href={`/${p.slug}`}>{p.name || p.slug}</a>
-								{p.name && (
-									<>
-										{" "}
-										<span class="muted small">{p.slug}</span>
-									</>
-								)}
-							</td>
-							<td class="muted">{p.description}</td>
-							<td class="n muted small">
-								<time datetime={p.created_at}>{fmtDate(p.created_at)}</time>
-							</td>
-						</tr>
-					))}
-				</tbody>
-			</table>
+		<div class="masthead-strip">
+			{projects.map((p) => (
+				<a href={`/${p.slug}`} title={p.name || p.slug}>
+					<Sparkline series={p.series} />
+					<b>{p.slug}</b>
+					<span class="num" title={`${full(p.dau)} users on the latest day`}>
+						{compact(p.dau)} users/day
+					</span>
+				</a>
+			))}
 		</div>
+	);
+}
+
+function Registry({ projects }: { projects: RegistryEntry[] | null }) {
+	if (projects === null) return <p class="empty">The registry is temporarily unavailable.</p>;
+	if (projects.length === 0) return <p class="empty">No active projects yet. Send an event and yours will be the first.</p>;
+	return (
+		<ul class="rows">
+			{projects.map((p) => (
+				<li>
+					<Sparkline series={p.series} />
+					<div class="what">
+						<a href={`/${p.slug}`}>{p.name || p.slug}</a>
+						{p.name && <span>{p.slug}</span>}
+						{p.description && <span>{p.description}</span>}
+					</div>
+					<div class="dau num" title={`${full(p.dau)} users on the latest day`}>
+						{compact(p.dau)} <span>users/day</span>
+					</div>
+				</li>
+			))}
+		</ul>
 	);
 }

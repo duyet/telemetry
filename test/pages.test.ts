@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { app } from "../src/index.ts";
-import { usageChartSvg } from "../src/pages/charts.tsx";
-import { DocsView } from "../src/pages/docs.tsx";
+import { sparklineSvg, usageChartSvg } from "../src/pages/charts.tsx";
+import { DocsView, headingId } from "../src/pages/docs.tsx";
 import { compact } from "../src/pages/format.ts";
-import { LandingView } from "../src/pages/landing.tsx";
+import { LandingView, STRIP_MAX } from "../src/pages/landing.tsx";
 import { emptyStats, orderedDims, ProjectView } from "../src/pages/project.tsx";
-import type { Project, Stats } from "../src/types.ts";
+import type { Project, RegistryEntry, Stats } from "../src/types.ts";
 import { addDays } from "../src/util.ts";
 import { makeEnv, call } from "./fakes.ts";
 
@@ -18,6 +18,20 @@ const project: Project = {
 	homepage: "https://github.com/duyet/demo-cli",
 	created_at: "2026-01-05T10:00:00Z",
 };
+
+const entry: RegistryEntry = { ...project, series: Array.from({ length: 30 }, (_, i) => 100 + ((i * 37) % 50)), dau: 412 };
+
+/** `n` distinct registry entries, so the strip and the list can be told apart from the fixture project. */
+function entries(n: number): RegistryEntry[] {
+	return Array.from({ length: n }, (_, i) => ({ ...entry, slug: `proj-${i}`, name: null, description: null, dau: i }));
+}
+
+/** Every `href="#x"` in the rail TOC must point at an element on the same page. */
+function tocTargets(html: string): { links: string[]; missing: string[] } {
+	const toc = html.match(/<ol class="toc"[^>]*>([\s\S]*?)<\/ol>/)?.[1] ?? "";
+	const links = [...toc.matchAll(/href="#([^"]+)"/g)].map((m) => m[1]!);
+	return { links, missing: links.filter((id) => !html.includes(`id="${id}"`)) };
+}
 
 const fixtureSnippets = [
 	{ id: "curl", label: "curl", lang: "sh", code: `curl -X POST ${BASE}/demo-cli -d '{"event":"ping"}'` },
@@ -63,14 +77,17 @@ function renderProject(stats: Stats, days = stats.days): string {
 	return String(ProjectView({ base: BASE, project, stats, days, snippets: fixtureSnippets, prompt: `Follow ${BASE}/demo-cli/install.md` }));
 }
 
-test("project page shows KPIs in compact tabular numbers", () => {
+test("project page states the KPIs as one sentence with compact tabular numbers", () => {
 	const html = renderProject(fixtureStats(30));
-	for (const label of ["Today", "DAU", "WAU", "MAU", "Events"]) expect(html).toContain(`<span>${label}</span>`);
-	expect(html).toContain(">4.8k<");
-	expect(html).toContain(">1.2M<");
+	expect(html).toMatch(/<em class="num" title="412">412<\/em> people used it yesterday/);
+	expect(html).toContain(">1.5k</span> this week");
+	expect(html).toContain(">4.8k</span> this month");
+	expect(html).toContain(">97</span> users and");
+	expect(html).toContain(">1.2M</span> events in the last 30 days");
 	expect(html).toContain('title="1,234,567"');
-	expect(html).toContain("<h1>Demo CLI</h1>");
-	expect(html).toContain('aria-current="page"');
+	expect(html).toContain('<h1 class="title">Demo CLI<span> · A command line tool that reports usage here.</span></h1>');
+	expect(html).toContain('href="https://github.com/duyet/demo-cli"');
+	expect(html).toContain('href="/demo-cli?days=30" aria-current="page"');
 	expect(html).toContain('href="/demo-cli?days=90"');
 });
 
@@ -80,8 +97,21 @@ test("chart is an accessible server-rendered SVG", () => {
 	expect(html).toContain("<title>Daily users");
 	expect(html).toContain("<polyline");
 	expect(html).toContain('<path d="M');
-	expect(html).toContain(">Sep 13<");
-	expect(html).toContain(">Oct 12<");
+	// Scale and date labels are HTML next to the SVG so they stay legible when the SVG shrinks on a phone.
+	expect(html).toContain("<span>Sep 13</span>");
+	expect(html).toContain("<span>Oct 12</span>");
+	expect(html).toMatch(/<span>\d+ users<\/span>/);
+	expect(html).not.toMatch(/<text[^>]*>Sep 13</);
+});
+
+test("sparkline is a tiny decorative SVG that never produces NaN", () => {
+	expect(sparklineSvg([])).not.toContain("<polyline");
+	expect(sparklineSvg([0, 0, 0])).not.toContain("NaN");
+	expect(sparklineSvg([5])).toContain("<circle");
+	const svg = sparklineSvg([1, 4, 2]);
+	expect(svg).toContain('aria-hidden="true"');
+	expect(svg).toContain("<polyline");
+	expect(svg).not.toContain("NaN");
 });
 
 test("chart handles empty, all-zero and single-point series", () => {
@@ -124,10 +154,10 @@ test("integrate section renders snippet tabs, prompt and links", () => {
 	expect(html).toContain("https://telemetry.test/demo-cli/v1");
 });
 
-test("no external scripts, stylesheets or fonts anywhere", () => {
+test("no external scripts, stylesheets or fonts anywhere; fonts come from /fonts/", () => {
 	const pages = [
 		renderProject(fixtureStats(30)),
-		String(LandingView({ base: BASE, projects: [project] })),
+		String(LandingView({ base: BASE, projects: [entry] })),
 		String(DocsView({ base: BASE })),
 	];
 	for (const html of pages) {
@@ -135,6 +165,8 @@ test("no external scripts, stylesheets or fonts anywhere", () => {
 		expect(html).not.toMatch(/<link[^>]+rel="stylesheet"/);
 		expect(html).not.toContain("fonts.googleapis");
 		expect(html).toContain("color-scheme:light");
+		for (const m of html.matchAll(/url\(([^)]+)\)/g)) expect(m[1]).toMatch(/^\/fonts\//);
+		for (const m of html.matchAll(/<link[^>]+href="([^"]+)"/g)) expect(m[1]).toMatch(/^(\/fonts\/|data:)/);
 	}
 });
 
@@ -149,7 +181,8 @@ test("empty stats render without errors", () => {
 	expect(html).toContain("No data in this range");
 	expect(html).not.toContain("Breakdown");
 	expect(html).not.toContain("NaN");
-	expect(html).toContain(">0<");
+	expect(html).toContain(">0</em> people used it yesterday");
+	expect(tocTargets(html).missing).toEqual([]);
 });
 
 test("escapes user-controlled project fields", () => {
@@ -165,29 +198,65 @@ test("unknown project returns a 404 page with the layout", async () => {
 	const res = await call(app, env, "/nope-x");
 	expect(res.status).toBe(404);
 	const html = await res.text();
-	expect(html).toContain("Project not found");
-	expect(html).toContain("<code>nope-x</code>");
-	expect(html).toContain('class="site-header"');
+	expect(html).toContain("There is no project called <code>nope-x</code>");
+	expect(html).toContain('<aside class="rail">');
+	expect(html).toContain('<main class="column">');
 	expect(html).toContain('href="/"');
 	const bad = await call(app, env, "/Not_Valid");
 	expect(bad.status).toBe(404);
 });
 
-test("landing page lists projects and has the create form", () => {
-	const html = String(LandingView({ base: BASE, projects: [project, { ...project, slug: "other", name: null, description: null }] }));
+test("landing page lists the registry with sparklines and has no create form", () => {
+	const html = String(LandingView({ base: BASE, projects: [entry, { ...entry, slug: "other", name: null, description: null, dau: 1200 }] }));
 	expect(html).toContain('id="projects"');
-	expect(html).toContain('href="/demo-cli"');
-	expect(html).toContain("Demo CLI");
+	expect(html).toContain('href="/demo-cli">Demo CLI</a>');
 	expect(html).toContain('href="/other">other</a>');
-	expect(html).toContain("Jan 5, 2026");
-	expect(html).toContain('<form id="create-form"');
-	expect(html).toContain('pattern="^[a-z0-9][a-z0-9-]{1,38}$"');
-	for (const f of ["slug", "name", "description", "homepage"]) expect(html).toContain(`<label for="${f}">`);
-	expect(html).toContain('"/api/projects"');
+	expect(html).toContain("2 projects, all public");
+	expect(html).toContain("1.2k <span>users/day</span>");
+	expect(html.match(/<polyline/g)?.length).toBe(4); // two strip tiles and two rows
+	expect(html).not.toContain("<form");
+	expect(html).not.toContain("Create a project");
+	expect(html).not.toContain('"/api/projects"');
 	expect(html).toContain("curl -X POST https://telemetry.test/my-cli");
+	expect(html).toContain("Save the admin token");
+	expect(html).toContain("OTEL_EXPORTER_OTLP_ENDPOINT=https://telemetry.test/my-cli");
 	expect(html).toContain("bunx cf deploy");
-	expect(html).toContain("Usage telemetry for open-source projects");
-	expect(String(LandingView({ base: BASE, projects: [] }))).toContain("No projects yet");
+	expect(html).toContain('href="https://github.com/duyet/telemetry"');
+	expect(html).toContain('<a href="https://duyet.net">by duyet</a>');
+});
+
+test("masthead strip shows at most five tiles and a quiet line when there are none", () => {
+	const many = String(LandingView({ base: BASE, projects: entries(8) }));
+	const strip = many.match(/<div class="masthead-strip">([\s\S]*?)<\/div>/)![1]!;
+	expect(strip.match(/<a /g)?.length).toBe(STRIP_MAX);
+	expect(strip).toContain('href="/proj-4"');
+	expect(strip).not.toContain('href="/proj-5"');
+	expect(many).toContain("8 projects, all public");
+	expect(many).toContain('href="/proj-7"'); // the full list still has it
+
+	const none = String(LandingView({ base: BASE, projects: [] }));
+	expect(none).not.toContain('class="masthead-strip"');
+	expect(none).toContain("No active projects yet");
+	expect(none).toContain("0 projects, all public");
+
+	const down = String(LandingView({ base: BASE, projects: null }));
+	expect(down).toContain("temporarily unavailable");
+});
+
+test("rail TOC links match section ids on every page", () => {
+	const pages = [
+		String(LandingView({ base: BASE, projects: [entry] })),
+		renderProject(fixtureStats(30)),
+		String(DocsView({ base: BASE })),
+	];
+	for (const html of pages) {
+		const { links, missing } = tocTargets(html);
+		expect(links.length).toBeGreaterThan(3);
+		expect(missing).toEqual([]);
+	}
+	const { links } = tocTargets(pages[0]!);
+	expect(links).toEqual(["how", "events", "otlp", "agent", "projects", "self-host", "privacy"]);
+	expect(tocTargets(pages[1]!).links).toEqual(["overview", "users", "breakdown", "integrate"]);
 });
 
 test("landing route renders even if the registry query fails", async () => {
@@ -195,15 +264,20 @@ test("landing route renders even if the registry query fails", async () => {
 	const res = await call(app, env, "/");
 	expect(res.status).toBe(200);
 	const html = await res.text();
-	expect(html).toContain('<form id="create-form"');
+	expect(html).toContain("No active projects yet");
 	expect(html).toContain('id="projects"');
+	expect(html).not.toContain("<form");
 });
 
-test("docs page renders markdown inside the layout", async () => {
+test("docs page renders markdown inside the layout with a TOC from the h2 headings", async () => {
 	const html = String(DocsView({ base: BASE }));
-	expect(html).toContain('<article class="prose">');
+	expect(html).toContain('<article class="prose lede">');
 	expect(html).toMatch(/<h1[^>]*>[^<]*API[^<]*<\/h1>/);
 	expect(html).toContain("<code>https://telemetry.test</code>");
+	expect(html).toContain('<h2 id="sending-events">Sending events</h2>');
+	expect(html).toContain('<a href="#sending-events">Sending events</a>');
+	expect(headingId("Limits & free tier")).toBe("limits-free-tier");
+	expect(headingId("<code>OTLP</code> v1")).toBe("otlp-v1");
 	const { env } = makeEnv();
 	const res = await call(app, env, "/docs");
 	expect(res.status).toBe(200);
@@ -223,7 +297,7 @@ test("compact number formatting", () => {
 test("element ids are unique on every page, since the inline scripts find elements by id", () => {
 	const pages = [
 		renderProject(fixtureStats(30)),
-		String(LandingView({ base: BASE, projects: [project] })),
+		String(LandingView({ base: BASE, projects: [entry] })),
 		String(DocsView({ base: BASE })),
 	];
 	for (const html of pages) {

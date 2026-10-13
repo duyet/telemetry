@@ -5,9 +5,14 @@ import { compact, full, shortDay } from "./format.ts";
 type Point = Stats["series"][number];
 
 const W = 720;
-const H = 224;
-const TOP = 28;
-const BOTTOM = 196;
+const H = 180;
+const TOP = 6;
+const BOTTOM = 179;
+
+const INK = "#171717";
+const MUTED = "#8f8f8f";
+const RULE = "#ebebeb";
+const WELL = "#e7e7e7";
 
 function esc(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -18,7 +23,7 @@ function r1(n: number): string {
 }
 
 /**
- * Daily users as a thin accent line over light event bars on a secondary scale.
+ * Daily users as a thin ink line over very light event bars on a secondary scale.
  * Responsive via viewBox; server-rendered; one path for all bars to keep the HTML small.
  */
 export function usageChartSvg(series: Point[]): string {
@@ -53,23 +58,18 @@ export function usageChartSvg(series: Point[]): string {
 	}
 
 	const parts: string[] = [];
-	parts.push(`<line x1="0" y1="${BOTTOM}" x2="${W}" y2="${BOTTOM}" stroke="#eaeaea"/>`);
-	if (bars) parts.push(`<path d="${bars}" fill="#dbe4f5"/>`);
+	parts.push(`<line x1="0" y1="${BOTTOM}" x2="${W}" y2="${BOTTOM}" stroke="${RULE}"/>`);
+	if (bars) parts.push(`<path d="${bars}" fill="${WELL}"/>`);
 	if (n === 1) {
-		parts.push(`<circle cx="${r1(x(0))}" cy="${r1(yU(series[0]!.dau))}" r="3.5" fill="#2563eb"/>`);
+		parts.push(`<circle cx="${r1(x(0))}" cy="${r1(yU(series[0]!.dau))}" r="3" fill="${INK}"/>`);
 	} else if (n > 1) {
 		parts.push(
-			`<polyline points="${pts.join(" ")}" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`,
+			`<polyline points="${pts.join(" ")}" fill="none" stroke="${INK}" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`,
 		);
 	}
 	if (n === 0 || (maxU === 0 && maxE === 0)) {
-		parts.push(`<text x="${W / 2}" y="${(TOP + BOTTOM) / 2}" text-anchor="middle" fill="#6b7280" font-size="13">No data in this range</text>`);
-	} else {
-		parts.push(`<text x="0" y="16" fill="#2563eb" font-size="12">${compact(maxU)} users</text>`);
-		parts.push(`<text x="${W}" y="16" text-anchor="end" fill="#6b7280" font-size="12">${compact(maxE)} events</text>`);
+		parts.push(`<text x="${W / 2}" y="${(TOP + BOTTOM) / 2}" text-anchor="middle" fill="${MUTED}" font-size="14">No data in this range</text>`);
 	}
-	if (first) parts.push(`<text x="0" y="${H - 6}" fill="#6b7280" font-size="12">${esc(shortDay(first))}</text>`);
-	if (last && n > 1) parts.push(`<text x="${W}" y="${H - 6}" text-anchor="end" fill="#6b7280" font-size="12">${esc(shortDay(last))}</text>`);
 
 	return (
 		`<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">` +
@@ -79,6 +79,57 @@ export function usageChartSvg(series: Point[]): string {
 	);
 }
 
+/** The chart with its scale and date labels as HTML, so they stay readable when the SVG scales down on a phone. */
 export function UsageChart({ series }: { series: Point[] }) {
-	return raw(usageChartSvg(series));
+	const n = series.length;
+	const maxU = Math.max(0, ...series.map((p) => p.dau));
+	const maxE = Math.max(0, ...series.map((p) => p.events));
+	const hasData = n > 0 && (maxU > 0 || maxE > 0);
+	return (
+		<div class="chart-wrap">
+			{hasData && (
+				<div class="chart-axis">
+					<span>{compact(maxU)} users</span>
+					<span class="muted">{compact(maxE)} events</span>
+				</div>
+			)}
+			{raw(usageChartSvg(series))}
+			{n > 0 && (
+				<div class="chart-axis muted">
+					<span>{shortDay(series[0]!.day)}</span>
+					{n > 1 && <span>{shortDay(series[n - 1]!.day)}</span>}
+				</div>
+			)}
+		</div>
+	);
+}
+
+const SW = 120;
+const SH = 30;
+
+/**
+ * Tiny daily-users line for registry tiles and rows: one thin ink polyline on the ground colour,
+ * a baseline in the rule colour, no axes. Decorative; the number next to it carries the meaning.
+ */
+export function sparklineSvg(series: number[]): string {
+	const n = series.length;
+	const max = Math.max(0, ...series);
+	const top = 4;
+	const bottom = SH - 3;
+	const x = (i: number) => (n <= 1 ? SW / 2 : (i / (n - 1)) * SW);
+	const y = (v: number) => (max ? bottom - (v / max) * (bottom - top) : bottom);
+	const parts: string[] = [`<line x1="0" y1="${bottom}" x2="${SW}" y2="${bottom}" stroke="${RULE}"/>`];
+	if (n === 1) {
+		parts.push(`<circle cx="${SW / 2}" cy="${y(series[0]!).toFixed(1)}" r="2" fill="${INK}"/>`);
+	} else if (n > 1) {
+		const pts = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+		parts.push(
+			`<polyline points="${pts}" fill="none" stroke="${INK}" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`,
+		);
+	}
+	return `<svg viewBox="0 0 ${SW} ${SH}" aria-hidden="true" focusable="false">${parts.join("")}</svg>`;
+}
+
+export function Sparkline({ series }: { series: number[] }) {
+	return raw(sparklineSvg(series));
 }
