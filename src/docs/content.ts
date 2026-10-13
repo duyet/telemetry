@@ -63,8 +63,8 @@ The body is one event object, or an array of at most 25 events. Content type \`a
 | \`event\` | string | yes | Matches \`^[A-Za-z0-9_.:/-]{1,64}$\`. |
 | \`id\` | string | no | A random install id that the client creates and keeps, at most 128 chars. The server hashes it with a secret salt and never stores it raw. |
 | \`version\` | string | no | The app version. Letters, digits, \`.\`, \`+\`, \`-\`, \`_\`, at most 32 chars. |
-| \`os\` | string | no | Lowercase, at most 16 chars of \`[a-z0-9_-]\`. For example \`linux\`, \`darwin\`, \`windows\`. |
-| \`arch\` | string | no | Same rules as \`os\`. For example \`x64\`, \`arm64\`. |
+| \`os\` | string | no | Free-form lowercase, at most 16 chars of \`[a-z0-9_-]\`. For example \`linux\`, \`darwin\`, \`windows\`. Send what the runtime reports. |
+| \`arch\` | string | no | Same rules as \`os\`. \`x64\`, \`x86_64\`, \`arm64\` and \`aarch64\` are all fine. Do not remap them. |
 | \`ci\` | boolean | no | True when the event came from a CI run. |
 | \`props\` | object | no | At most 8 entries. Keys match \`[a-z0-9_.-]{1,32}\`. Values are string, number or boolean, and are cut to 64 chars. |
 | \`n\` | integer | no | Occurrence count, 1 to 1000. Default 1. |
@@ -73,6 +73,7 @@ Rules the server applies:
 
 - The country comes from Cloudflare. The client cannot set it.
 - The IP address and user agent are never stored.
+- Any event with an \`id\` counts that id as an active user for that UTC day. \`install\` and \`ping\` are not special. Days are UTC.
 - Without \`id\`, the server uses a hash that rotates every day. That counts daily users (DAU) only. Weekly and monthly users need a stable \`id\`.
 - A bad optional field (for example an \`os\` with spaces) is ignored, and the event is still counted. Only a missing or invalid \`event\` drops the event.
 - Invalid events in a batch are dropped. The valid ones are kept.
@@ -137,13 +138,15 @@ export OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<random-install-id>,service.
 
 Follow these in every client. They are what makes telemetry safe to ship.
 
-- Honor \`DO_NOT_TRACK=1\` and \`<APP>_TELEMETRY_DISABLED=1\`. Send nothing when either is set.
-- Skip sending in CI unless the user opts in (for example \`<APP>_TELEMETRY_CI=1\`).
-- \`<APP>_TELEMETRY_DEBUG=1\` prints the payload and does not send it.
-- Create a random id once and keep it at \`~/.config/<app>/telemetry-id\`, or the platform equivalent. Never derive it from the machine, user, hostname or path.
+- A variable counts as set when it has any value except empty, \`0\` or \`false\`. This applies to \`DO_NOT_TRACK\`, \`CI\` and the \`<APP>_TELEMETRY_*\` flags.
+- Honor \`DO_NOT_TRACK\` and \`<APP>_TELEMETRY_DISABLED\`. Send nothing when either is set. If a config file holds an opt-out and it cannot be read, send nothing.
+- Skip sending in CI unless the user opts in with \`<APP>_TELEMETRY_CI=1\`. When opted in, send \`ci: true\`.
+- \`<APP>_TELEMETRY_DEBUG=1\` prints the payload and does not send it. It has no side effects: no id file, no daily stamp, no notice.
+- Create a random id once and keep it at \`~/.config/<app>/telemetry-id\`, or the platform equivalent. Never derive it from the machine, user, hostname or path. Prefer the tool's own env prefix and config directory when it has one.
+- Fail closed. If the id or the daily stamp cannot be saved, send nothing. Otherwise a daemon would send on every tick.
 - Send fire-and-forget with a timeout of 1 second or less. Never block the app, never crash it, never retry in a loop.
-- Send at most one \`ping\` per day, plus meaningful events such as a command run.
-- Print a one-line notice on first run. It says what is sent and how to turn it off.
+- Send \`install\` once on first run. Then send at most one \`ping\` per UTC day, plus meaningful events such as a command run. Use the UTC date for the daily gate.
+- Show a one-line notice on first run, in the app's user-visible channel: stderr for a CLI, the log or notify channel for a daemon or plugin, the UI for a desktop app. It says what is sent and how to turn it off.
 - Send no personal data. No file paths, hostnames, emails, usernames, arguments values or error messages.
 
 Ready-made snippets for curl, shell, TypeScript, Rust, Go, Python and the browser are on each project page, and in \`${base}/<project>/install.md\`.
@@ -309,67 +312,95 @@ You are a coding agent. Follow these steps to add anonymous usage telemetry that
 | \`event\` | Required. \`^[A-Za-z0-9_.:/-]{1,64}$\`. |
 | \`id\` | Random install id the client creates once and keeps. Hashed on the server. |
 | \`version\` | At most 32 chars. |
-| \`os\`, \`arch\` | Lowercase, at most 16 chars. |
-| \`ci\` | Boolean. |
+| \`os\`, \`arch\` | Free-form lowercase, at most 16 chars. Send what the runtime gives (\`x64\`, \`x86_64\`, \`arm64\`, \`aarch64\` are all fine). Do not remap. |
+| \`ci\` | Boolean. \`true\` for a CI run. |
 | \`props\` | At most 8 entries. Keys \`[a-z0-9_.-]{1,32}\`. String, number or boolean values. |
 | \`n\` | Optional count, 1 to 1000. |
 
 Success is HTTP 202. The server returns 400, 404, 413 or 429 otherwise. Ignore every response.
 
+## How the server counts
+
+- Any event with an \`id\` counts that id as an active user for that UTC day. \`install\` and \`ping\` are not special.
+- So send \`install\` once on first run, then at most one \`ping\` per UTC day, plus a few meaningful events. More pings add no users.
+- Days are UTC. The client's daily gate must use the UTC date.
+- An event without \`id\` counts daily users only.
+
+## Conventions used below
+
+- **Set.** An env var counts as set for any value except empty, \`0\` or \`false\`. This applies to \`DO_NOT_TRACK\`, \`CI\` and every \`${p}_TELEMETRY_*\` flag.
+- **Prefix and paths.** \`${p}_*\` and \`~/.config/${project}/\` are defaults. Prefer the tool's own env prefix and config directory when it has them. For example, a CLI called \`anyr\` that already uses \`ANYR_*\` and \`~/.anyrouter/\` keeps those. Use the defaults only when the tool has no convention. Replace them everywhere below, in the code and in the README.
+
 ## Steps
 
 ### 1. Detect the language and entry point
 
-Read the repo. Find the language, the runtime, the package manifest, the app version source and the entry point (main function, CLI parser, daemon loop, or app startup). Check the existing config directory convention and the existing update-check or background code. Reuse them.
+Read the repo. Find the language, the runtime, the package manifest, the app version source and the entry point (main function, CLI parser, daemon loop, or app startup). Check the existing env prefix, config directory and config file, and the existing update-check or background code. Reuse them.
 
 ### 2. Pick the hook
 
-- A once-a-day gate. Best places are an existing update check, a daemon tick, or startup. Send \`ping\` at most once per day. Keep the last-sent date in a small file next to the id.
+- A once-a-day gate. Best places are an existing update check, a daemon tick, or startup. Send \`ping\` at most once per UTC day. Keep the last-sent UTC date (\`YYYY-MM-DD\`) in a small file next to the id. Write the stamp first, then send. If the stamp cannot be written, do not send.
+- Send \`install\` once, when the id is first created.
 - Key commands or features, as separate events (for example \`run\` with \`props.command\`). Keep names short and few. Never put user input in an event name.
+- Commands that return before the startup hook, such as \`--version\` and \`--help\`, may stay untracked.
 - For an install script, send one \`install\` event. Without an id it counts daily users only. That is fine.
 
 ### 3. Add a small telemetry module
 
-Add one file with one function, \`track(event, props)\`. Start from the snippet for this language. Snippets for curl, shell, TypeScript, Rust, Go, Python and the browser are on ${url} (Integrate tab) and in ${base}/docs. The ts, rust, go and python versions already include the id file, the opt-out check and the timeout.
+Add one file with one function, \`track(event, props)\`. Start from the snippet for this language. Snippets for curl, shell, TypeScript, Rust, Go, Python and the browser are on ${url} (Integrate tab) and in ${base}/docs. The ts, rust, go and python versions already include the id file, the opt-out check, the debug mode, fail-closed id handling and the timeout. They do not include the daily gate: add it.
 
 Use ${url} as the endpoint. Set the app version from the package metadata, not a literal.
 
-### 4. Add opt-out, debug, CI skip and the first-run notice
+### 4. Add opt-out, debug, CI skip, fail-closed and the first-run notice
 
-- Disabled when \`DO_NOT_TRACK=1\` or \`${p}_TELEMETRY_DISABLED=1\`. Also add a config flag if the app has a config file.
-- \`${p}_TELEMETRY_DEBUG=1\` prints the payload to stderr and sends nothing.
-- Skip when \`CI\` is set, unless \`${p}_TELEMETRY_CI=1\`.
-- Keep the id at \`~/.config/${project}/telemetry-id\` (use the platform config directory). Create it once with a random UUID. If the file cannot be written, send without an id.
-- On first run, when the id file is created, print one line to stderr:
+- Disabled when \`DO_NOT_TRACK\` or \`${p}_TELEMETRY_DISABLED\` is set. Also add a config flag if the app has a config file. If the config file exists but cannot be read, do not send.
+- Skip when \`CI\` is set, unless \`${p}_TELEMETRY_CI=1\`. When the opt-in is used, send \`ci:true\`.
+- \`${p}_TELEMETRY_DEBUG=1\` prints the payload and sends nothing. It has no side effects: no id file, no stamp, no notice. If there is no id yet, print a placeholder. It may print on every due check.
+- Keep the id at \`~/.config/${project}/telemetry-id\` (use the platform config directory). Create it once with a random UUID.
+- Fail closed. If the id or the daily stamp cannot be saved, skip sending. Otherwise a daemon would ping on every tick. Do not send without an id (an install script is the one exception).
+- On first run, when the id file is created, show one line in the app's user-visible channel: stderr for a CLI, the log or notify channel for a daemon or plugin (stderr may be ignored there), the UI for a desktop app:
   \`${project} collects anonymous usage data. Opt out: ${p}_TELEMETRY_DISABLED=1 or DO_NOT_TRACK=1. Details: ${url}\`
 
 ### 5. Add a test
 
-Add a test that proves nothing is sent when \`${p}_TELEMETRY_DISABLED=1\`, when \`DO_NOT_TRACK=1\`, and when \`CI\` is set. Mock or stub the network call and assert it is not made. Also assert the debug mode prints and does not send. Use the repo's existing test framework.
+Add a test that proves nothing is sent when \`${p}_TELEMETRY_DISABLED=1\`, when \`DO_NOT_TRACK=1\`, and when \`CI\` is set (and that the CI opt-in sends \`ci:true\`). Also prove:
+
+- the debug mode prints and does not send, and writes no id file or stamp;
+- nothing is sent when the id or stamp cannot be written;
+- a second due check on the same UTC day sends no second \`ping\`.
+
+Mock or stub the network call and assert it is not made. Use the repo's existing test framework.
 
 ### 6. Add a "Telemetry" section to the README
 
-Use this template and adjust it to what the code really sends:
+Use this template and adjust it to what the code really sends. Use the tool's real env prefix. Keep the config-file opt-out only if the tool has one. Say where the notice appears (stderr, the log, or the UI).
 
 ~~~markdown
 ## Telemetry
 
 ${project} sends anonymous usage data so the maintainers know which versions and platforms are in use.
 
-What is sent: event name (for example \`ping\`, \`run\`), a random install id, app version, OS, CPU architecture, whether it ran in CI, and the country (derived by Cloudflare from the request).
+What is sent: event name (for example \`install\`, \`ping\`, \`run\`), a random install id, app version, OS, CPU architecture, whether it ran in CI, and the country (derived by Cloudflare from the request). An \`install\` event is sent once on first run, then at most one \`ping\` per day.
 
 What is not sent: IP address, user agent, file paths, hostnames, usernames, emails, command arguments, or any file content.
 
-Opt out: set \`${p}_TELEMETRY_DISABLED=1\` or \`DO_NOT_TRACK=1\`. Set \`${p}_TELEMETRY_DEBUG=1\` to print what would be sent.
+On first run, ${project} prints a one-line notice to <stderr | the log | the UI> that says this.
+
+Opt out: set \`${p}_TELEMETRY_DISABLED=1\` or \`DO_NOT_TRACK=1\`, or <the config-file setting, if the tool has a config file>. Set \`${p}_TELEMETRY_DEBUG=1\` to print what would be sent, without sending it.
 
 Public aggregate stats: ${url}
 ~~~
 
 ### 7. Verify
 
-1. Run the app with \`${p}_TELEMETRY_DEBUG=1\`. Check the printed payload matches the table above and has no personal data.
-2. Run the tests.
-3. Send one real ping. Remove \`DEBUG\`, unset \`CI\`, run the app once, or run:
+Required, always possible: a dry run.
+
+1. Run the tests.
+2. Run a normal command with \`${p}_TELEMETRY_DEBUG=1\`. Pick a command that reaches the startup hook, not \`--version\` or \`--help\`. Check the printed payload matches the table above and has no personal data. Check that no id file and no stamp were created.
+
+Optional, only when network use is allowed: one real ping.
+
+3. Remove \`DEBUG\`, unset \`CI\`, run the app once, or run:
    \`curl -X POST ${url} -H 'content-type: application/json' -d '{"event":"ping","version":"0.0.0"}'\`
 4. Check ${url} or \`curl ${base}/api/${project}/stats\`. The \`summary.today.users\` value updates within about 5 minutes.
 
@@ -379,7 +410,9 @@ Public aggregate stats: ${url}
 - Do not block the main path. Send in the background with a timeout of 1 second or less.
 - Do not retry in a loop. One attempt, ignore the result.
 - Do not crash on errors. Wrap the whole send in a catch-all.
-- Do not send on every command. At most one \`ping\` per day.
+- Do not send on every command. At most one \`ping\` per UTC day.
+- Do not send when the id or the stamp cannot be saved. Fail closed.
+- Do not write files, show the notice or send in debug mode.
 - Do not derive the id from hardware, username or paths. It is random and stored in the config directory.
 - Do not enable telemetry in CI by default.
 `);
@@ -410,11 +443,15 @@ export function snippets(base: string, project: string): Snippet[] {
 			label: "Shell (install script)",
 			lang: "sh",
 			code: `# Anonymous install ping. Put it near the end of install.sh. No id: counts daily users only.
-if [ "\${DO_NOT_TRACK-}" != "1" ] && [ "\${${p}_TELEMETRY_DISABLED-}" != "1" ] && [ -z "\${CI-}" ]; then
+# An env var is "set" for any value except empty, 0 or false.
+truthy() { case $(printf %s "$1" | tr '[:upper:]' '[:lower:]') in ""|0|false) return 1 ;; *) return 0 ;; esac; }
+if ! truthy "\${DO_NOT_TRACK-}" && ! truthy "\${${p}_TELEMETRY_DISABLED-}" \\
+  && { ! truthy "\${CI-}" || truthy "\${${p}_TELEMETRY_CI-}"; }; then
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m | tr '[:upper:]' '[:lower:]')
-  body=$(printf '{"event":"install","os":"%s","arch":"%s"}' "$os" "$arch")
-  if [ "\${${p}_TELEMETRY_DEBUG-}" = "1" ]; then
+  if truthy "\${CI-}"; then ci=true; else ci=false; fi
+  body=$(printf '{"event":"install","os":"%s","arch":"%s","ci":%s}' "$os" "$arch" "$ci")
+  if truthy "\${${p}_TELEMETRY_DEBUG-}"; then
     echo "[telemetry] $body" >&2
   else
     (curl -fsS -m 1 -X POST -H 'content-type: application/json' -d "$body" ${url} >/dev/null 2>&1 &)
@@ -433,40 +470,50 @@ const ENDPOINT = "${url}";
 const VERSION = "0.0.0"; // set from your package metadata
 const env = process.env;
 
+// "Set" means any value except empty, 0 or false.
+const truthy = (v?: string): boolean => !!v && !["0", "false"].includes(v.toLowerCase());
+
 function enabled(): boolean {
-	if (env.DO_NOT_TRACK === "1" || env.${p}_TELEMETRY_DISABLED === "1") return false;
-	return !env.CI || env.${p}_TELEMETRY_CI === "1";
+	if (truthy(env.DO_NOT_TRACK) || truthy(env.${p}_TELEMETRY_DISABLED)) return false;
+	return !truthy(env.CI) || truthy(env.${p}_TELEMETRY_CI);
 }
 
-function installId(): string | undefined {
+// Returns undefined when the event must be skipped: the id cannot be saved (fail closed).
+// Debug mode never writes. It reads the id, or shows a placeholder.
+function installId(debug: boolean): string | undefined {
 	const file = join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "${project}", "telemetry-id");
 	try {
-		return readFileSync(file, "utf8").trim();
+		const id = readFileSync(file, "utf8").trim();
+		if (id) return id;
 	} catch {}
+	if (debug) return "new-install-id";
 	try {
 		const id = crypto.randomUUID();
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, id);
-		console.error("${notice}");
+		console.error("${notice}"); // stderr suits a CLI. A daemon or plugin should use its log channel.
 		return id;
 	} catch {
-		return undefined; // cannot persist: send without an id
+		return undefined;
 	}
 }
 
 export function track(event: string, props: Record<string, string | number | boolean> = {}): void {
 	try {
 		if (!enabled()) return;
+		const debug = truthy(env.${p}_TELEMETRY_DEBUG);
+		const id = installId(debug);
+		if (!id) return;
 		const body = JSON.stringify({
 			event,
-			id: installId(),
+			id,
 			version: VERSION,
 			os: process.platform,
 			arch: process.arch,
-			ci: !!env.CI,
+			ci: truthy(env.CI),
 			props,
 		});
-		if (env.${p}_TELEMETRY_DEBUG === "1") {
+		if (debug) {
 			console.error("[telemetry]", body);
 			return;
 		}
@@ -491,12 +538,16 @@ use std::{env, fs, thread, time::Duration};
 
 const ENDPOINT: &str = "${url}";
 
+/// "Set" means any value except empty, 0 or false.
+fn truthy(key: &str) -> bool {
+    env::var(key).map_or(false, |v| !matches!(v.to_ascii_lowercase().as_str(), "" | "0" | "false"))
+}
+
 fn enabled() -> bool {
-    let on = |k: &str| env::var(k).as_deref() == Ok("1");
-    if on("DO_NOT_TRACK") || on("${p}_TELEMETRY_DISABLED") {
+    if truthy("DO_NOT_TRACK") || truthy("${p}_TELEMETRY_DISABLED") {
         return false;
     }
-    env::var_os("CI").is_none() || on("${p}_TELEMETRY_CI")
+    !truthy("CI") || truthy("${p}_TELEMETRY_CI")
 }
 
 fn random_id() -> String {
@@ -504,20 +555,27 @@ fn random_id() -> String {
     (0..2).map(|_| format!("{:016x}", RandomState::new().build_hasher().finish())).collect()
 }
 
-fn install_id() -> Option<String> {
-    let dir = env::var_os("XDG_CONFIG_HOME")
+/// None means skip the event: the id cannot be saved (fail closed).
+/// Debug mode never writes. It reads the id, or shows a placeholder.
+fn install_id(debug: bool) -> Option<String> {
+    let file = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .or_else(|| env::var_os("APPDATA").map(PathBuf::from))?
-        .join("${project}");
-    let file = dir.join("telemetry-id");
+        .join("${project}")
+        .join("telemetry-id");
     if let Ok(id) = fs::read_to_string(&file) {
-        return Some(id.trim().to_string());
+        if !id.trim().is_empty() {
+            return Some(id.trim().to_string());
+        }
+    }
+    if debug {
+        return Some("new-install-id".to_string());
     }
     let id = random_id();
-    fs::create_dir_all(&dir).ok()?;
+    fs::create_dir_all(file.parent()?).ok()?;
     fs::write(&file, &id).ok()?;
-    eprintln!("${notice}");
+    eprintln!("${notice}"); // stderr suits a CLI. A daemon or plugin should use its log channel.
     Some(id)
 }
 
@@ -527,14 +585,16 @@ pub fn track(event: &str) -> Option<thread::JoinHandle<()>> {
     if !enabled() {
         return None;
     }
-    let id = install_id().map(|id| format!(r#""id":"{id}","#)).unwrap_or_default();
+    let debug = truthy("${p}_TELEMETRY_DEBUG");
+    let id = install_id(debug)?;
     let body = format!(
-        r#"{{"event":"{event}",{id}"version":"{}","os":"{}","arch":"{}"}}"#,
+        r#"{{"event":"{event}","id":"{id}","version":"{}","os":"{}","arch":"{}","ci":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         env::consts::OS,
-        env::consts::ARCH
+        env::consts::ARCH,
+        truthy("CI")
     );
-    if env::var("${p}_TELEMETRY_DEBUG").as_deref() == Ok("1") {
+    if debug {
         eprintln!("[telemetry] {body}");
         return None;
     }
@@ -569,22 +629,37 @@ import (
 const endpoint = "${url}"
 const version = "0.0.0" // set from your build, for example with -ldflags
 
-func enabled() bool {
-	if os.Getenv("DO_NOT_TRACK") == "1" || os.Getenv("${p}_TELEMETRY_DISABLED") == "1" {
+// truthy: "set" means any value except empty, 0 or false.
+func truthy(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "", "0", "false":
 		return false
 	}
-	return os.Getenv("CI") == "" || os.Getenv("${p}_TELEMETRY_CI") == "1"
+	return true
 }
 
-// installID returns "" when the id cannot be persisted, so the event is sent without an id.
-func installID() string {
+func enabled() bool {
+	if truthy("DO_NOT_TRACK") || truthy("${p}_TELEMETRY_DISABLED") {
+		return false
+	}
+	return !truthy("CI") || truthy("${p}_TELEMETRY_CI")
+}
+
+// installID returns "" when the event must be skipped: the id cannot be saved (fail closed).
+// Debug mode never writes. It reads the id, or shows a placeholder.
+func installID(debug bool) string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return ""
 	}
 	file := filepath.Join(dir, "${project}", "telemetry-id")
 	if b, err := os.ReadFile(file); err == nil {
-		return strings.TrimSpace(string(b))
+		if id := strings.TrimSpace(string(b)); id != "" {
+			return id
+		}
+	}
+	if debug {
+		return "new-install-id"
 	}
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -594,7 +669,7 @@ func installID() string {
 	if os.MkdirAll(filepath.Dir(file), 0o755) != nil || os.WriteFile(file, []byte(id), 0o600) != nil {
 		return ""
 	}
-	fmt.Fprintln(os.Stderr, "${notice}")
+	fmt.Fprintln(os.Stderr, "${notice}") // stderr suits a CLI. A daemon or plugin should use its log channel.
 	return id
 }
 
@@ -606,15 +681,19 @@ func Track(event string, props map[string]any) <-chan struct{} {
 		close(done)
 		return done
 	}
+	debug := truthy("${p}_TELEMETRY_DEBUG")
+	id := installID(debug)
+	if id == "" {
+		close(done)
+		return done
+	}
 	payload := map[string]any{
 		"event":   event,
+		"id":      id,
 		"version": version,
 		"os":      runtime.GOOS,
 		"arch":    runtime.GOARCH,
-		"ci":      os.Getenv("CI") != "",
-	}
-	if id := installID(); id != "" {
-		payload["id"] = id
+		"ci":      truthy("CI"),
 	}
 	if len(props) > 0 {
 		payload["props"] = props
@@ -624,7 +703,7 @@ func Track(event string, props map[string]any) <-chan struct{} {
 		close(done)
 		return done
 	}
-	if os.Getenv("${p}_TELEMETRY_DEBUG") == "1" {
+	if debug {
 		fmt.Fprintf(os.Stderr, "[telemetry] %s\\n", body)
 		close(done)
 		return done
@@ -656,25 +735,35 @@ ENDPOINT = "${url}"
 VERSION = "0.0.0"  # set from your package metadata
 
 
+def _truthy(key):
+    # "Set" means any value except empty, 0 or false.
+    return os.environ.get(key, "").lower() not in ("", "0", "false")
+
+
 def _enabled():
-    env = os.environ
-    if env.get("DO_NOT_TRACK") == "1" or env.get("${p}_TELEMETRY_DISABLED") == "1":
+    if _truthy("DO_NOT_TRACK") or _truthy("${p}_TELEMETRY_DISABLED"):
         return False
-    return not env.get("CI") or env.get("${p}_TELEMETRY_CI") == "1"
+    return not _truthy("CI") or _truthy("${p}_TELEMETRY_CI")
 
 
-def _install_id():
-    # Returns None when the id cannot be persisted: the event is sent without an id.
+def _install_id(debug):
+    # Returns None when the event must be skipped: the id cannot be saved (fail closed).
+    # Debug mode never writes. It reads the id, or shows a placeholder.
     try:
         base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
         file = base / "${project}" / "telemetry-id"
         try:
-            return file.read_text().strip()
+            found = file.read_text().strip()
+            if found:
+                return found
         except OSError:
             pass
+        if debug:
+            return "new-install-id"
         install_id = uuid.uuid4().hex
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(install_id)
+        # stderr suits a CLI. A daemon or plugin should use its log channel.
         print("${notice}", file=sys.stderr)
         return install_id
     except Exception:
@@ -685,19 +774,21 @@ def track(event, **props):
     try:
         if not _enabled():
             return
+        debug = _truthy("${p}_TELEMETRY_DEBUG")
+        install_id = _install_id(debug)
+        if not install_id:
+            return
         body = {
             "event": event,
+            "id": install_id,
             "version": VERSION,
             "os": platform.system().lower(),
             "arch": platform.machine().lower(),
-            "ci": bool(os.environ.get("CI")),
+            "ci": _truthy("CI"),
         }
-        install_id = _install_id()
-        if install_id:
-            body["id"] = install_id
         if props:
             body["props"] = props
-        if os.environ.get("${p}_TELEMETRY_DEBUG") == "1":
+        if debug:
             print("[telemetry]", json.dumps(body), file=sys.stderr)
             return
 
@@ -796,9 +887,10 @@ Fetch \`${base}/<slug>/install.md\` and follow it step by step. It has the exact
 ## Rules
 
 - Anonymous only. No PII: no paths, hostnames, emails, usernames or argument values.
-- Honor \`DO_NOT_TRACK=1\` and \`<APP>_TELEMETRY_DISABLED=1\`. Skip in CI unless opted in. \`<APP>_TELEMETRY_DEBUG=1\` prints the payload instead of sending.
+- Honor \`DO_NOT_TRACK\` and \`<APP>_TELEMETRY_DISABLED\` (set means any value except empty, \`0\` or \`false\`). Skip in CI unless \`<APP>_TELEMETRY_CI=1\`. \`<APP>_TELEMETRY_DEBUG=1\` prints the payload instead of sending, with no side effects.
+- Fail closed: if the id or the daily stamp cannot be saved, send nothing.
 - Fire and forget, timeout 1 second or less, no retries, never block or crash the app.
-- At most one \`ping\` per day, plus a few meaningful events.
+- Any event with an id counts that id as an active user for the UTC day. Send \`install\` once, then at most one \`ping\` per UTC day, plus a few meaningful events.
 - Add a test for the opt-outs and a "Telemetry" section in the README.
 
 ## More

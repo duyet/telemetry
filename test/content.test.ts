@@ -17,6 +17,64 @@ describe("agent-facing docs carry the exact project endpoint", () => {
 		expect(md).not.toContain("${");
 	});
 
+	// Field reports: agents shipped daemons that pinged every tick and debug modes that wrote files.
+	test("install.md states the server semantics: UTC days, any id event is an active user", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toContain("UTC");
+		expect(md).toContain("active user for that UTC day");
+		expect(md).toMatch(/`install` and `ping` are not special/);
+		expect(md).toContain("at most one `ping` per UTC day");
+	});
+
+	test("install.md says debug mode has no side effects", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toMatch(/no side effects: no id file, no stamp, no notice/);
+	});
+
+	test("install.md says to fail closed when the id or stamp cannot be persisted", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toContain("Fail closed");
+		expect(md).toMatch(/id or the daily stamp cannot be saved, skip sending/);
+		expect(md).toMatch(/config file exists but cannot be read, do not send/);
+	});
+
+	test("install.md offers a dry-run verify path as the required minimum, and a real ping only when network is allowed", () => {
+		const md = installMd(BASE, PROJECT);
+		const verify = md.slice(md.indexOf("### 7. Verify"));
+		expect(verify).toContain("Required, always possible: a dry run");
+		expect(verify).toContain("HERDR_DESK_TELEMETRY_DEBUG=1");
+		expect(verify).toContain("only when network use is allowed");
+		expect(verify.indexOf("dry run")).toBeLessThan(verify.indexOf("real ping"));
+	});
+
+	test("install.md defines env truthiness once and names the CI opt-in", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toContain("any value except empty, `0` or `false`");
+		expect(md).toContain("HERDR_DESK_TELEMETRY_CI=1");
+		expect(md).toContain("`ci:true`");
+	});
+
+	test("install.md lets the tool's own env prefix win and does not assume stderr for the notice", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toContain("ANYR_*");
+		expect(md).toContain("Prefer the tool's own env prefix");
+		expect(md).toMatch(/log or notify channel for a daemon or plugin/);
+	});
+
+	test("install.md does not remap os and arch, and leaves short-circuit commands untracked", () => {
+		const md = installMd(BASE, PROJECT);
+		expect(md).toContain("`aarch64`");
+		expect(md).toContain("Do not remap");
+		expect(md).toContain("`--version`");
+	});
+
+	test("api reference states the same server semantics", () => {
+		const md = apiMd(BASE);
+		expect(md).toContain("active user for that UTC day");
+		expect(md).toContain("Fail closed");
+		expect(md).toContain("no id file, no daily stamp, no notice");
+	});
+
 	test("agentPrompt points at the project's install.md", () => {
 		const prompt = agentPrompt(BASE, PROJECT);
 		expect(prompt).toContain(`${ENDPOINT}/install.md`);
@@ -68,6 +126,16 @@ describe("snippets", () => {
 		expect(shell?.code).toContain("DO_NOT_TRACK");
 		expect(shell?.code).toContain("HERDR_DESK_TELEMETRY_DISABLED");
 		expect(shell?.code).toContain("CI");
+	});
+
+	test("persisting snippets fail closed and keep debug free of side effects", () => {
+		for (const id of ["ts", "rust", "go", "python"]) {
+			const code = all.find((s) => s.id === id)?.code ?? "";
+			expect(code, id).toContain("fail closed");
+			expect(code, id).toContain("new-install-id");
+			expect(code, id).not.toContain("send without an id");
+			expect(code, id).toContain("HERDR_DESK_TELEMETRY_CI");
+		}
 	});
 
 	test("clients time out within 1 second", () => {
