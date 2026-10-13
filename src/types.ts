@@ -47,6 +47,23 @@ export interface Project {
 	created_at: string;
 }
 
+/** A project as the public registry shows it: only projects with rolled-up data in the last 30 days. */
+export interface RegistryEntry extends Project {
+	/** Daily users for the last 30 closed UTC days, oldest first, zero-filled. */
+	series: number[];
+	/** Latest closed day's DAU, or 0. */
+	dau: number;
+}
+
+/** Returned once, in the ingest response, when the first event auto-creates a project. */
+export interface CreatedProject {
+	slug: string;
+	created: true;
+	/** Shown once. Only its hash is stored. Needed to rename, rotate, import, or delete. */
+	admin_token: string;
+	page_url: string;
+}
+
 /** dim name → value → [users, events]. Dim names: event, version, os, arch, country, ci, source, prop:<key>. */
 export type Dims = Record<string, Record<string, [users: number, events: number]>>;
 

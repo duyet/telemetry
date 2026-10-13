@@ -1,6 +1,6 @@
 import { getSalt, rememberProject } from "./db.ts";
 import { addToDims, runRollup, topDims, upsertDaily } from "./rollup.ts";
-import type { Ctx, DailyRow, Dims, Project } from "./types.ts";
+import type { Ctx, DailyRow, Dims, Project, RegistryEntry } from "./types.ts";
 import { addDays, baseUrl, isValidSlug, randomHex, sha256hex, utcDay } from "./util.ts";
 
 const MAX_NAME = 60;
@@ -30,6 +30,12 @@ export async function queryProjects(db: D1Database): Promise<Project[]> {
 		.prepare("SELECT slug, name, description, homepage, created_at FROM projects ORDER BY created_at DESC")
 		.all<Project>();
 	return results;
+}
+
+/** Public registry: active projects only, so slugs created by junk traffic never show. Owner: backend agent. */
+export async function queryRegistry(db: D1Database): Promise<RegistryEntry[]> {
+	const projects = await queryProjects(db);
+	return projects.map((p) => ({ ...p, series: [], dau: 0 }));
 }
 
 export async function listProjects(c: Ctx): Promise<Response> {

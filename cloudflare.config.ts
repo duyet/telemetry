@@ -6,6 +6,7 @@ export default defineConfig({
 		name: "telemetry",
 		compatibilityDate: "2026-10-06",
 		entrypoint,
+		assets: { notFoundHandling: "none" },
 		env: {
 			DB: bindings.d1({ name: "telemetry" }),
 			EVENTS: bindings.analyticsEngineDataset({ name: "telemetry_events" }),
