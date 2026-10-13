@@ -9,9 +9,11 @@ const day = (ago: number) => addDays(utcDay(), -ago);
 
 beforeEach(resetStatsCache);
 
-async function setup(handler?: (q: string) => Record<string, unknown>[]): Promise<TestEnv> {
+/** Registers "demo" (created long before any window) unless a test passes its own `created_at`. */
+async function setup(handler?: (q: string) => Record<string, unknown>[], createdAt = "2026-01-01T00:00:00.000Z"): Promise<TestEnv> {
 	const t = makeEnv(handler);
 	await ensureReady(t.env.DB);
+	t.db.sqlite.run(`INSERT INTO projects (slug, admin_hash, created_at) VALUES ('demo', 'x', '${createdAt}')`);
 	return t;
 }
 
@@ -100,6 +102,30 @@ test("today comes from one live AE query filtered to the project", async () => {
 	expect(t.analytics.queries[0]).toContain(`timestamp >= '${utcDay()}T00:00:00Z'`);
 });
 
+test("an unregistered slug has zero today and no AE query, because it can only hold someone else's old events", async () => {
+	const t = await setup(() => [{ users: 9, events: 9 }]);
+	const { summary } = await getStats(t.env, "ghost", 7);
+	expect(summary.today).toEqual({ users: 0, events: 0 });
+	expect(t.analytics.queries).toHaveLength(0);
+});
+
+test("the live today query starts at created_at when the project was created today, so a re-registered slug does not inherit old events", async () => {
+	const created = new Date();
+	created.setUTCHours(0, 0, 0, 0);
+	created.setTime(created.getTime() + 5 * 3_600_000 + 123);
+	const t = await setup(() => [], created.toISOString());
+	await getStats(t.env, "demo", 7);
+	expect(t.analytics.queries).toHaveLength(1);
+	expect(t.analytics.queries[0]).toContain(`timestamp >= '${utcDay()}T05:00:00Z'`);
+	expect(t.analytics.queries[0]).not.toContain(`'${utcDay()}T00:00:00Z'`);
+});
+
+test("the live today query starts at midnight UTC when the project is older than today", async () => {
+	const t = await setup(() => [], `${day(3)}T08:30:00.000Z`);
+	await getStats(t.env, "demo", 7);
+	expect(t.analytics.queries[0]).toContain(`timestamp >= '${utcDay()}T00:00:00Z'`);
+});
+
 test("stats still render from D1 when Analytics Engine fails, because a broken AE must not take the page down", async () => {
 	const err = spyOn(console, "error").mockImplementation(() => {});
 	const t = await setup(() => {
@@ -146,7 +172,7 @@ test("each (project, range) is cached on its own", async () => {
 	t.db.resetCounters();
 	await getStats(t.env, "demo", 30);
 	await getStats(t.env, "other", 7);
-	expect(t.db.reads).toBe(2);
+	expect(t.db.reads).toBe(3); // demo/30: 1 (live today cached); other/7: daily + project lookup
 });
 
 test("the live today count is reused for 5 minutes across ranges, so AE reads stay far below 10k a day", async () => {

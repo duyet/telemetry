@@ -60,3 +60,22 @@ export function dayRange(from: string, to?: string): string {
 	const start = `timestamp >= ${lit(`${from}T00:00:00Z`)}`;
 	return to ? `${start} AND timestamp < ${lit(`${to}T00:00:00Z`)}` : start;
 }
+
+/** ISO 8601 with a zone at second precision, the form the unified SQL API takes for `timestamp`. */
+export function aeTime(iso: string): string {
+	return `${new Date(iso).toISOString().slice(0, 19)}Z`;
+}
+
+/**
+ * Per-project lower bound on `timestamp`, as a clause to append to a WHERE. Projects not listed are unfiltered.
+ * Slugs outlive their owners in AE (90 days), so a re-registered slug must not inherit the old events.
+ */
+export function sinceFloor(floors: { slug: string; since: string }[]): string {
+	if (!floors.length) return "";
+	const slugs = floors.map((f) => lit(f.slug)).join(",");
+	// Inside OR the binding rejects string timestamps (type error) and CAST, so compare Unix seconds.
+	const each = floors
+		.map((f) => ` OR (index1 = ${lit(f.slug)} AND toUnixTimestamp(timestamp) >= ${Math.floor(Date.parse(f.since) / 1000)})`)
+		.join("");
+	return ` AND (index1 NOT IN (${slugs})${each})`;
+}

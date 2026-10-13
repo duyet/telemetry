@@ -1,4 +1,4 @@
-import { BLOB, dayRange, EVENTS, lit, PROP_BLOBS, sql, TABLE, USERS } from "./ae.ts";
+import { aeTime, BLOB, dayRange, EVENTS, lit, PROP_BLOBS, sinceFloor, sql, TABLE, USERS } from "./ae.ts";
 import { type Bindings, type DailyRow, type Dims, TOP_N } from "./types.ts";
 import { addDays, utcDay } from "./util.ts";
 
@@ -27,24 +27,31 @@ export function topDims(dims: Dims): Dims {
 	return out;
 }
 
-function window(from: string, to: string, project?: string): string {
+function window(from: string, to: string, project: string | undefined, floor: string): string {
 	const range = dayRange(from, to);
-	return project ? `${range} AND index1 = ${lit(project)}` : range;
+	return (project ? `${range} AND index1 = ${lit(project)}` : range) + floor;
 }
 
 /** Users and events per project over [from, to). */
-function totals(env: Bindings, from: string, to: string, project?: string): Promise<AeRow[]> {
+function totals(env: Bindings, from: string, to: string, project: string | undefined, floor: string): Promise<AeRow[]> {
 	return sql(
 		env.ANALYTICS,
-		`SELECT index1 AS p, ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE ${window(from, to, project)} GROUP BY p`,
+		`SELECT index1 AS p, ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE ${window(from, to, project, floor)} GROUP BY p`,
 	);
 }
 
 /** Users and events per project and value of one blob over [from, to). */
-function byBlob(env: Bindings, blob: string, from: string, to: string, project?: string): Promise<AeRow[]> {
+function byBlob(
+	env: Bindings,
+	blob: string,
+	from: string,
+	to: string,
+	project: string | undefined,
+	floor: string,
+): Promise<AeRow[]> {
 	return sql(
 		env.ANALYTICS,
-		`SELECT index1 AS p, ${blob} AS v, ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE ${window(from, to, project)} GROUP BY p, v`,
+		`SELECT index1 AS p, ${blob} AS v, ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE ${window(from, to, project, floor)} GROUP BY p, v`,
 	);
 }
 
@@ -89,18 +96,25 @@ export async function runRollup(
 ): Promise<{ projects: number }> {
 	const next = addDays(day, 1);
 	const known = project
-		? env.DB.prepare("SELECT slug FROM projects WHERE slug = ?").bind(project)
-		: env.DB.prepare("SELECT slug FROM projects");
-	const [slugs, dayRows, weekRows, monthRows, dimRows, propRows] = await Promise.all([
-		known.all<{ slug: string }>(),
-		totals(env, day, next, project),
-		totals(env, addDays(day, -6), next, project),
-		totals(env, addDays(day, -29), next, project),
-		Promise.all(DIM_BLOBS.map(([, blob]) => byBlob(env, blob, day, next, project))),
-		Promise.all(PROP_BLOBS.map((blob) => byBlob(env, blob, day, next, project))),
+		? env.DB.prepare("SELECT slug, created_at FROM projects WHERE slug = ?").bind(project)
+		: env.DB.prepare("SELECT slug, created_at FROM projects");
+	const { results: slugs } = await known.all<{ slug: string; created_at: string }>();
+
+	// Only projects created inside the widest window need a floor, which keeps the SQL short for a big registry.
+	const windowStart = `${addDays(day, -29)}T00:00:00Z`;
+	const floors = slugs
+		.map((r) => ({ slug: r.slug, since: aeTime(r.created_at) }))
+		.filter((f) => f.since > windowStart);
+	const floor = sinceFloor(floors);
+	const [dayRows, weekRows, monthRows, dimRows, propRows] = await Promise.all([
+		totals(env, day, next, project, floor),
+		totals(env, addDays(day, -6), next, project, floor),
+		totals(env, addDays(day, -29), next, project, floor),
+		Promise.all(DIM_BLOBS.map(([, blob]) => byBlob(env, blob, day, next, project, floor))),
+		Promise.all(PROP_BLOBS.map((blob) => byBlob(env, blob, day, next, project, floor))),
 	]);
 
-	const exists = new Set(slugs.results.map((r) => r.slug));
+	const exists = new Set(slugs.map((r) => r.slug));
 	const acc = new Map<string, Acc>();
 	// Every project active in the 30-day window gets a row, so a quiet day still records its WAU/MAU.
 	for (const r of monthRows) {

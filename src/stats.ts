@@ -1,4 +1,4 @@
-import { dayRange, EVENTS, lit, sql, TABLE, USERS } from "./ae.ts";
+import { aeTime, EVENTS, lit, sql, TABLE, USERS } from "./ae.ts";
 import { addToDims, topDims } from "./rollup.ts";
 import type { Bindings, Dims, Stats } from "./types.ts";
 import { addDays, utcDay } from "./util.ts";
@@ -25,14 +25,25 @@ export function resetStatsCache(): void {
 	todayCache.clear();
 }
 
-/** Live AE count for the current UTC day. Failures degrade to zeros so the page still renders. */
+/**
+ * Live AE count for the current UTC day, or since registration if that is later, so a re-registered slug
+ * does not show the previous owner's events. Failures degrade to zeros so the page still renders.
+ */
 async function liveToday(env: Bindings, slug: string, today: string): Promise<Today> {
 	const hit = todayCache.get(slug);
 	if (hit && Date.now() - hit.at < TODAY_TTL_MS) return hit.today;
 	try {
+		// Read only on a cache miss, so a cached today costs no D1 read.
+		const project = await env.DB.prepare("SELECT created_at FROM projects WHERE slug = ?")
+			.bind(slug)
+			.first<{ created_at: string }>();
+		if (!project) return { users: 0, events: 0 };
+		const dayStart = `${today}T00:00:00Z`;
+		const created = aeTime(project.created_at);
+		const since = created > dayStart ? created : dayStart;
 		const [row] = await sql(
 			env.ANALYTICS,
-			`SELECT ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE index1 = ${lit(slug)} AND ${dayRange(today)}`,
+			`SELECT ${USERS} AS users, ${EVENTS} AS events FROM ${TABLE} WHERE index1 = ${lit(slug)} AND timestamp >= ${lit(since)}`,
 		);
 		const live = { users: Number(row?.users ?? 0), events: Number(row?.events ?? 0) };
 		todayCache.set(slug, { at: Date.now(), today: live });

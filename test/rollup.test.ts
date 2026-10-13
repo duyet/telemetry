@@ -32,10 +32,10 @@ function ae(f: Fixture) {
 	};
 }
 
-async function setup(f: Fixture, slugs: string[]): Promise<TestEnv> {
+async function setup(f: Fixture, slugs: string[], createdAt: Record<string, string> = {}): Promise<TestEnv> {
 	const t = makeEnv(ae(f));
 	await ensureReady(t.env.DB);
-	for (const s of slugs) t.db.sqlite.run(`INSERT INTO projects (slug, admin_hash, created_at) VALUES ('${s}', 'x', '2026-01-01')`);
+	for (const s of slugs) t.db.sqlite.run(`INSERT INTO projects (slug, admin_hash, created_at) VALUES ('${s}', 'x', '${createdAt[s] ?? "2026-01-01"}')`);
 	t.db.resetCounters();
 	return t;
 }
@@ -200,6 +200,51 @@ test("with a project given, every query is filtered to it and others are untouch
 	await runRollup(t.env, DAY, "a");
 	expect(t.analytics.queries.every((q) => q.includes("index1 = 'a'"))).toBe(true);
 	expect(stored(t).map((r) => r.project)).toEqual(["a"]);
+});
+
+test("re-registering a deleted slug does not inherit the previous owner's events: a project created inside the window is floored at created_at in every AE query", async () => {
+	const t = await setup({ day: [{ p: "new", users: 1, events: 1 }] }, ["new", "old"], { new: "2026-10-09T17:13:05.123Z" });
+	await runRollup(t.env, DAY);
+	const floor =
+		" AND (index1 NOT IN ('new') OR (index1 = 'new' AND toUnixTimestamp(timestamp) >= 1791565985))";
+	expect(t.analytics.queries.length).toBeGreaterThan(0);
+	expect(t.analytics.queries.every((q) => q.includes(floor))).toBe(true);
+	expect(t.analytics.queries.some((q) => q.includes("'old'"))).toBe(false);
+});
+
+test("several projects created inside the window each get their own floor in one clause", async () => {
+	const t = await setup({}, ["a", "b", "c"], { a: "2026-10-01T00:00:00.000Z", b: "2026-09-20T01:02:03.999Z" });
+	await runRollup(t.env, DAY);
+	const q = t.analytics.queries[0] ?? "";
+	expect(q).toContain(
+		" AND (index1 NOT IN ('a','b') OR (index1 = 'a' AND toUnixTimestamp(timestamp) >= 1790812800) OR (index1 = 'b' AND toUnixTimestamp(timestamp) >= 1789866123))",
+	);
+	expect(q).not.toContain("'c'");
+});
+
+test("a project created before the window gets no floor, so the SQL stays short however big the registry is", async () => {
+	const t = await setup({}, ["a", "b"], { a: `${MONTH_START}T00:00:00.000Z`, b: "2025-01-01T00:00:00.000Z" });
+	await runRollup(t.env, DAY);
+	expect(t.analytics.queries.some((q) => q.includes("NOT IN"))).toBe(false);
+});
+
+test("the floor compares whole Unix seconds, since the binding rejects string timestamps inside OR", async () => {
+	const t = await setup({}, ["a"], { a: "2026-10-13T17:13:05.123Z" });
+	await runRollup(t.env, "2026-10-14");
+	const stamps = t.analytics.queries.flatMap((q) =>
+		[...q.matchAll(/index1 = 'a' AND toUnixTimestamp\(timestamp\) >= (\d+)\)/g)].map((m) => m[1]),
+	);
+	expect(stamps.length).toBeGreaterThan(0);
+	for (const stamp of stamps) expect(stamp).toBe(String(Date.UTC(2026, 9, 13, 17, 13, 5) / 1000));
+});
+
+test("with a project given, the floor applies to that project alone", async () => {
+	const t = await setup({}, ["a", "b"], { a: "2026-10-09T00:00:00.000Z", b: "2026-10-09T00:00:00.000Z" });
+	await runRollup(t.env, DAY, "a");
+	for (const q of t.analytics.queries) {
+		expect(q).toContain("index1 = 'a' AND (index1 NOT IN ('a') OR (index1 = 'a' AND toUnixTimestamp(timestamp) >= 1791504000))");
+		expect(q).not.toContain("'b'");
+	}
 });
 
 test("the cron rollup defaults to yesterday UTC", async () => {
