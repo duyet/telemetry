@@ -387,14 +387,44 @@ test("OTLP respects the per-project daily cap with a 429 and writes nothing", as
 	expect(t.events.points).toHaveLength(0);
 });
 
-test("OTLP to an unknown project is a 404 and does no D1 read after warm-up", async () => {
+test("OTLP to a reserved or invalid slug is a 404 that costs no D1 call", async () => {
 	const t = await setup();
 	await otlp(t, "logs", JSON.stringify({ resourceLogs: [] }));
 	t.db.resetCounters();
-	const res = await call(app, t.env, "/nope/v1/logs", { method: "POST", body: "{}", headers: JSON_HEADERS });
-	expect(res.status).toBe(404);
-	expect(t.db.reads).toBe(0);
+	for (const slug of ["api", "Bad_Slug"]) {
+		const res = await call(app, t.env, `/${slug}/v1/logs`, { method: "POST", body: JSON.stringify(logs), headers: JSON_HEADERS });
+		expect(res.status).toBe(404);
+	}
+	expect(t.db.reads + t.db.writes).toBe(0);
 	expect(t.events.points).toHaveLength(0);
+});
+
+test("an OTLP collector can create a project with its first export, and the body stays OTLP-shaped", async () => {
+	const t = await setup();
+	const res = await call(app, t.env, "/new-svc/v1/logs", { method: "POST", body: JSON.stringify(logs), headers: JSON_HEADERS });
+	expect(res.status).toBe(200);
+	const token = res.headers.get("x-telemetry-admin-token") ?? "";
+	expect(token).toMatch(/^tk_[0-9a-f]{48}$/);
+	expect(res.headers.get("cache-control")).toBe("no-store");
+	const body = (await res.json()) as Record<string, unknown>;
+	expect(Object.keys(body).every((k) => k === "partialSuccess")).toBe(true);
+	expect(t.db.sqlite.query("SELECT slug FROM projects WHERE slug = 'new-svc'").get()).toEqual({ slug: "new-svc" });
+	expect(t.events.points.length).toBeGreaterThan(0);
+
+	const again = await call(app, t.env, "/new-svc/v1/logs", { method: "POST", body: JSON.stringify(logs), headers: JSON_HEADERS });
+	expect(again.headers.get("x-telemetry-admin-token")).toBeNull();
+});
+
+test("an empty OTLP export to an unknown slug is a 400 and creates nothing, so idle exporters cannot claim slugs", async () => {
+	const t = await setup();
+	const res = await call(app, t.env, "/idle-svc/v1/logs", {
+		method: "POST",
+		body: JSON.stringify({ resourceLogs: [] }),
+		headers: JSON_HEADERS,
+	});
+	expect(res.status).toBe(400);
+	expect(res.headers.get("x-telemetry-admin-token")).toBeNull();
+	expect(t.db.sqlite.query("SELECT count(*) AS n FROM projects WHERE slug = 'idle-svc'").get()).toEqual({ n: 0 });
 });
 
 test("OTLP ingest never touches D1 once warm", async () => {

@@ -17,6 +17,8 @@ export const RESERVED = new Set([
 	"robots.txt",
 	"new",
 	"login",
+	"fonts",
+	"_headers",
 ]);
 
 export function isValidSlug(slug: string): boolean {

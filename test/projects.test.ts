@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
+import { resetGuard } from "../src/guard.ts";
 import { app } from "../src/index.ts";
 import { TOP_N } from "../src/types.ts";
 import { addDays, sha256hex, utcDay } from "../src/util.ts";
 import { call, makeEnv, type TestEnv } from "./fakes.ts";
+
+beforeEach(resetGuard);
 
 const json = (body: unknown, init: RequestInit & { ip?: string } = {}) => ({
 	method: "POST",
@@ -11,83 +14,165 @@ const json = (body: unknown, init: RequestInit & { ip?: string } = {}) => ({
 });
 const auth = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
 
-async function create(t: TestEnv, slug: string, ip?: string) {
-	const res = await call(app, t.env, "/api/projects", json({ slug, name: slug }, { ip }));
-	return { res, body: (await res.json()) as Record<string, string> };
-}
-
+/** Projects are created by their first event. Returns the admin token from that response. */
 async function createWithToken(t: TestEnv, slug = "demo") {
-	const { body } = await create(t, slug);
-	return body.admin_token as string;
+	const res = await call(app, t.env, `/${slug}`, json({ event: "install" }));
+	const body = (await res.json()) as { project: { admin_token: string } };
+	return body.project.admin_token;
 }
 
 const daily = (t: TestEnv, project = "demo") =>
 	t.db.sqlite.query("SELECT * FROM daily WHERE project = ? ORDER BY day").all(project) as Record<string, unknown>[];
 
-test("create returns the admin token once and only its hash is stored, so a DB leak cannot hijack projects", async () => {
+test("POST /api/projects is gone: the first event creates a project", async () => {
 	const t = makeEnv();
-	const { res, body } = await create(t, "demo");
-	expect(res.status).toBe(201);
-	expect(body.admin_token).toMatch(/^tk_[0-9a-f]{48}$/);
-	expect(body.otlp_endpoint).toBe("https://telemetry.test/demo");
-	expect(body.install_md).toBe("https://telemetry.test/demo/install.md");
-	expect(body.stats_url).toBe("https://telemetry.test/api/demo/stats");
-
-	const rows = t.db.sqlite.query("SELECT * FROM projects").all() as { admin_hash: string }[];
-	expect(JSON.stringify(rows)).not.toContain(body.admin_token as string);
-	expect(rows[0]?.admin_hash).toBe(await sha256hex(body.admin_token as string));
-});
-
-test("a created project shows up in the public list without leaking secrets", async () => {
-	const t = makeEnv();
-	await create(t, "demo");
-	const list = (await (await call(app, t.env, "/api/projects")).json()) as { projects: Record<string, unknown>[] };
-	expect(list.projects.map((p) => p.slug)).toEqual(["demo"]);
-	expect(Object.keys(list.projects[0] as object)).not.toContain("admin_hash");
-	expect(Object.keys(list.projects[0] as object)).not.toContain("creator");
-});
-
-test("duplicate slugs get 409 so nobody can take over an existing project", async () => {
-	const t = makeEnv();
-	await create(t, "demo");
-	const { res } = await create(t, "demo");
-	expect(res.status).toBe(409);
-});
-
-test.each([
-	["reserved slug", { slug: "api" }],
-	["too short slug", { slug: "a" }],
-	["uppercase slug", { slug: "Demo" }],
-	["missing slug", {}],
-	["name over 60 chars", { slug: "demo", name: "x".repeat(61) }],
-	["description over 200 chars", { slug: "demo", description: "x".repeat(201) }],
-	["javascript: homepage", { slug: "demo", homepage: "javascript:alert(1)" }],
-	["non-url homepage", { slug: "demo", homepage: "not a url" }],
-])("create rejects %s with 400", async (_name, body) => {
-	const t = makeEnv();
-	const res = await call(app, t.env, "/api/projects", json(body));
-	expect(res.status).toBe(400);
+	const res = await call(app, t.env, "/api/projects", json({ slug: "demo" }));
+	expect([404, 405]).toContain(res.status);
 	expect(t.db.sqlite.query("SELECT count(*) AS n FROM projects").get()).toEqual({ n: 0 });
 });
 
-test("create rejects a body that is not a JSON object", async () => {
+const day = (ago: number) => addDays(utcDay(), -ago);
+const addDaily = (t: TestEnv, project: string, d: string, dau: number) =>
+	t.db.sqlite.run(`INSERT INTO daily VALUES ('${project}', '${d}', ${dau}, ${dau}, ${dau}, ${dau}, '{}', 'ae')`);
+type Registry = { projects: Record<string, unknown>[] };
+
+test("the public registry lists only projects with rollups in the last 30 days, so spam slugs never show", async () => {
 	const t = makeEnv();
-	expect((await call(app, t.env, "/api/projects", { method: "POST", body: "nope" })).status).toBe(400);
-	expect((await call(app, t.env, "/api/projects", json([1]))).status).toBe(400);
+	for (const slug of ["active", "stale", "junk"]) await createWithToken(t, slug);
+	addDaily(t, "active", day(3), 4);
+	addDaily(t, "stale", day(31), 9);
+	addDaily(t, "active", utcDay(), 99);
+	const list = (await (await call(app, t.env, "/api/projects")).json()) as Registry;
+	expect(list.projects.map((p) => p.slug)).toEqual(["active"]);
+	expect(list.projects[0]?.dau).toBe(0);
+	expect(Object.keys(list.projects[0] as object).sort()).toEqual(
+		["created_at", "dau", "description", "homepage", "name", "series", "slug"],
+	);
 });
 
-test("the 6th create in a day from one IP is refused, but another IP is not affected", async () => {
+test("registry series are 30 closed days oldest first and zero-filled, and dau is yesterday's", async () => {
 	const t = makeEnv();
-	for (let i = 0; i < 5; i++) expect((await create(t, `proj-${i}`, "198.51.100.1")).res.status).toBe(201);
-	expect((await create(t, "proj-5", "198.51.100.1")).res.status).toBe(429);
-	expect((await create(t, "proj-5", "198.51.100.2")).res.status).toBe(201);
+	await createWithToken(t, "aaa");
+	await createWithToken(t, "bbb");
+	addDaily(t, "aaa", day(30), 7);
+	addDaily(t, "aaa", day(2), 5);
+	addDaily(t, "bbb", day(1), 3);
+	addDaily(t, "bbb", day(10), 2);
+	const { projects } = (await (await call(app, t.env, "/api/projects")).json()) as {
+		projects: { slug: string; series: number[]; dau: number }[];
+	};
+	expect(projects.map((p) => [p.slug, p.dau])).toEqual([
+		["bbb", 3],
+		["aaa", 0],
+	]);
+	const aaa = projects[1]?.series ?? [];
+	expect(aaa).toHaveLength(30);
+	expect(aaa[0]).toBe(7);
+	expect(aaa[28]).toBe(5);
+	expect(aaa.reduce((a, b) => a + b, 0)).toBe(12);
+	expect(projects[0]?.series[29]).toBe(3);
+	expect(projects[0]?.series[20]).toBe(2);
 });
 
-test("the creator column holds a salted hash, never the raw IP", async () => {
+test("the registry costs one D1 query however many projects there are", async () => {
 	const t = makeEnv();
-	await create(t, "demo", "198.51.100.1");
-	const row = t.db.sqlite.query("SELECT creator FROM projects").get() as { creator: string };
-	expect(row.creator).toMatch(/^[0-9a-f]{16}$/);
+	await createWithToken(t, "aaa");
+	await createWithToken(t, "bbb");
+	addDaily(t, "aaa", day(1), 1);
+	addDaily(t, "bbb", day(1), 1);
+	t.db.resetCounters();
+	await call(app, t.env, "/api/projects");
+	expect(t.db.reads + t.db.writes).toBe(1);
+});
+
+const patch = (t: TestEnv, body: unknown, token?: string, slug = "demo") =>
+	call(app, t.env, `/api/${slug}`, {
+		method: "PATCH",
+		body: typeof body === "string" ? body : JSON.stringify(body),
+		...(token ? auth(token) : {}),
+	});
+const stored = (t: TestEnv, slug = "demo") =>
+	t.db.sqlite.query("SELECT name, description, homepage FROM projects WHERE slug = ?").get(slug);
+
+test("PATCH sets the display name and details, leaves missing fields alone, and never returns secrets", async () => {
+	const t = makeEnv();
+	const token = await createWithToken(t);
+	const res = await patch(t, { name: "Demo", description: "A demo", homepage: "https://example.com" }, token);
+	expect(res.status).toBe(200);
+	const { project } = (await res.json()) as { project: Record<string, unknown> };
+	expect(project).toMatchObject({ slug: "demo", name: "Demo", description: "A demo", homepage: "https://example.com" });
+	expect(Object.keys(project)).not.toContain("admin_hash");
+	expect(Object.keys(project)).not.toContain("creator");
+
+	await patch(t, { name: "Renamed" }, token);
+	expect(stored(t)).toEqual({ name: "Renamed", description: "A demo", homepage: "https://example.com" });
+});
+
+test("PATCH with null or an empty string clears a field", async () => {
+	const t = makeEnv();
+	const token = await createWithToken(t);
+	await patch(t, { name: "Demo", description: "A demo", homepage: "https://example.com" }, token);
+	await patch(t, { description: null, homepage: "" }, token);
+	expect(stored(t)).toEqual({ name: "Demo", description: null, homepage: null });
+});
+
+test.each([
+	["name over 60 chars", { name: "x".repeat(61) }],
+	["description over 200 chars", { description: "x".repeat(201) }],
+	["a javascript: homepage", { homepage: "javascript:alert(1)" }],
+	["a non-url homepage", { homepage: "not a url" }],
+	["a homepage over 200 chars", { homepage: `https://example.com/${"x".repeat(200)}` }],
+	["a non-string name", { name: 5 }],
+	["a slug change, since raw events are stored under the slug", { slug: "other" }],
+	["no known field", { color: "red" }],
+	["a body that is not an object", [1]],
+	["a body that is not JSON", "nope"],
+])("PATCH rejects %s with 400 and changes nothing", async (_name, body) => {
+	const t = makeEnv();
+	const token = await createWithToken(t);
+	const res = await patch(t, body, token);
+	expect(res.status).toBe(400);
+	expect(stored(t)).toEqual({ name: null, description: null, homepage: null });
+	expect(t.db.sqlite.query("SELECT slug FROM projects").all()).toEqual([{ slug: "demo" }]);
+});
+
+test("PATCH needs the project's own token: 401 without it or with another project's, 404 for unknown projects", async () => {
+	const t = makeEnv();
+	const token = await createWithToken(t);
+	const other = await createWithToken(t, "other");
+	expect((await patch(t, { name: "x" })).status).toBe(401);
+	expect((await patch(t, { name: "x" }, "tk_wrong")).status).toBe(401);
+	expect((await patch(t, { name: "x" }, other)).status).toBe(401);
+	expect((await patch(t, { name: "x" }, token, "ghost")).status).toBe(404);
+	expect(stored(t)).toEqual({ name: null, description: null, homepage: null });
+});
+
+const rotate = (t: TestEnv, token?: string, slug = "demo") =>
+	call(app, t.env, `/api/${slug}/token`, { method: "POST", ...(token ? auth(token) : {}) });
+
+test("rotating the token makes the old one stop working, so a leaked token can be revoked", async () => {
+	const t = makeEnv();
+	const old = await createWithToken(t);
+	const res = await rotate(t, old);
+	expect(res.status).toBe(200);
+	expect(res.headers.get("cache-control")).toBe("no-store");
+	const { admin_token } = (await res.json()) as { admin_token: string };
+	expect(admin_token).toMatch(/^tk_[0-9a-f]{48}$/);
+	expect(admin_token).not.toBe(old);
+	expect(t.db.sqlite.query("SELECT admin_hash FROM projects").get()).toEqual({ admin_hash: await sha256hex(admin_token) });
+
+	expect((await patch(t, { name: "x" }, old)).status).toBe(401);
+	expect((await rotate(t, old)).status).toBe(401);
+	expect((await patch(t, { name: "x" }, admin_token)).status).toBe(200);
+});
+
+test("rotation needs the admin token", async () => {
+	const t = makeEnv();
+	const token = await createWithToken(t);
+	expect((await rotate(t)).status).toBe(401);
+	expect((await rotate(t, "tk_wrong")).status).toBe(401);
+	expect((await rotate(t, token, "ghost")).status).toBe(404);
+	expect(t.db.sqlite.query("SELECT admin_hash FROM projects").get()).toEqual({ admin_hash: await sha256hex(token) });
 });
 
 test("delete needs the right token: 404 for unknown projects, 401 for missing or wrong tokens", async () => {
@@ -115,10 +200,10 @@ test("delete removes the project and its rollups so the slug can be reused", asy
 	expect(res.status).toBe(200);
 	expect(((await res.json()) as { deleted: boolean }).deleted).toBe(true);
 	expect(daily(t)).toEqual([]);
-	expect((await create(t, "demo")).res.status).toBe(201);
+	const again = await call(app, t.env, "/demo", json({ event: "install" }));
+	expect(((await again.json()) as { project?: { created: boolean } }).project?.created).toBe(true);
 });
 
-const day = (ago: number) => addDays(utcDay(), -ago);
 const row = (d: string, dau = 1, dims: unknown = {}) => ({ day: d, dau, wau: dau, mau: dau, events: dau * 2, dims });
 const importRows = (t: TestEnv, token: string, rows: unknown[]) =>
 	call(app, t.env, "/api/demo/import", json({ rows }, auth(token)));

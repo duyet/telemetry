@@ -1,12 +1,12 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { ensureReady, projectExists } from "./db.ts";
-import { handleIngest, handleOtlp } from "./ingest.ts";
+import { ADMIN_TOKEN_HEADER, handleIngest, handleOtlp } from "./ingest.ts";
 import { agentsMd, installMd, llmsTxt } from "./notes.ts";
 import { docsPage } from "./pages/docs.tsx";
 import { landingPage } from "./pages/landing.tsx";
 import { projectPage } from "./pages/project.tsx";
-import { createProject, deleteProject, importRollups, listProjects, rollupProject } from "./projects.ts";
+import { deleteProject, importRollups, listProjects, rollupProject, rotateToken, updateProject } from "./projects.ts";
 import { runRollup } from "./rollup.ts";
 import { getStats, parseDays } from "./stats.ts";
 import type { App, Bindings } from "./types.ts";
@@ -18,7 +18,15 @@ app.use("*", async (c, next) => {
 	await ensureReady(c.env.DB);
 	await next();
 });
-app.use("*", cors({ origin: "*", allowMethods: ["GET", "POST", "DELETE", "OPTIONS"], maxAge: 86400 }));
+app.use(
+	"*",
+	cors({
+		origin: "*",
+		allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+		exposeHeaders: [ADMIN_TOKEN_HEADER],
+		maxAge: 86400,
+	}),
+);
 
 app.get("/health", (c) => c.text("ok"));
 app.get("/", landingPage);
@@ -27,7 +35,6 @@ app.get("/llms.txt", (c) => c.text(llmsTxt(baseUrl(c.req.raw))));
 app.get("/AGENTS.md", (c) => c.text(agentsMd(baseUrl(c.req.raw)), 200, { "content-type": "text/markdown; charset=utf-8" }));
 
 app.get("/api/projects", listProjects);
-app.post("/api/projects", createProject);
 app.get("/api/:proj/stats", async (c) => {
 	const slug = c.req.param("proj");
 	if (!isValidSlug(slug) || !(await projectExists(c.env.DB, slug))) return c.json({ error: "project not found" }, 404);
@@ -35,6 +42,8 @@ app.get("/api/:proj/stats", async (c) => {
 });
 app.post("/api/:proj/import", (c) => importRollups(c, c.req.param("proj")));
 app.post("/api/:proj/rollup", (c) => rollupProject(c, c.req.param("proj")));
+app.post("/api/:proj/token", (c) => rotateToken(c, c.req.param("proj")));
+app.patch("/api/:proj", (c) => updateProject(c, c.req.param("proj")));
 app.delete("/api/:proj", (c) => deleteProject(c, c.req.param("proj")));
 
 app.get("/:proj/install.md", async (c) => {

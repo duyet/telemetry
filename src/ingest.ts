@@ -2,7 +2,8 @@ import { writeEvents } from "./ae.ts";
 import { getSalt, projectExists } from "./db.ts";
 import { checkIp, reserve } from "./guard.ts";
 import { EVENT_RE, parseOtlp } from "./otlp.ts";
-import { type Ctx, MAX_BATCH, MAX_BODY_BYTES, MAX_PROP_LEN, MAX_PROPS, type TelemetryEvent } from "./types.ts";
+import { autoCreate } from "./projects.ts";
+import { type CreatedProject, type Ctx, MAX_BATCH, MAX_BODY_BYTES, MAX_PROP_LEN, MAX_PROPS, type TelemetryEvent } from "./types.ts";
 import { isValidSlug, sha256hex, utcDay } from "./util.ts";
 
 const VERSION_RE = /^[\w.+-]{1,32}$/;
@@ -152,20 +153,32 @@ function parseJson(bytes: Uint8Array): unknown {
 	}
 }
 
-/** 404 for unknown projects (answered from memory), then the per-IP limit. Null means admitted. */
-async function gate(c: Ctx, project: string): Promise<Response | null> {
-	if (!isValidSlug(project) || !(await projectExists(c.env.DB, project))) {
-		return c.json({ error: "project not found" }, 404);
-	}
+export const ADMIN_TOKEN_HEADER = "x-telemetry-admin-token";
+
+/** 404 for invalid or reserved slugs, then the per-IP limit. `known` is answered from isolate memory. */
+async function gate(c: Ctx, project: string): Promise<Response | { known: boolean }> {
+	if (!isValidSlug(project)) return c.json({ error: "invalid or reserved project slug" }, 404);
+	const known = await projectExists(c.env.DB, project);
 	const limit = checkIp(clientIp(c));
-	if (limit.ok) return null;
+	if (limit.ok) return { known };
 	return c.json({ error: "rate limit exceeded, slow down" }, 429, { "retry-after": String(limit.retryAfter) });
 }
 
-/** `POST /<project>`: native JSON ingest. Never touches D1 after the first warm-up. */
+/** Creates an unknown project once its events are valid. The token goes in a header too, since an OTLP body must stay OTLP. */
+async function createIfNew(c: Ctx, project: string, known: boolean): Promise<CreatedProject | Response | null> {
+	if (known) return null;
+	const created = await autoCreate(c, project);
+	if (created && !(created instanceof Response)) {
+		c.header(ADMIN_TOKEN_HEADER, created.admin_token);
+		c.header("cache-control", "no-store");
+	}
+	return created;
+}
+
+/** `POST /<project>`: native JSON ingest. A known project costs no D1 call after the first warm-up. */
 export async function handleIngest(c: Ctx, project: string): Promise<Response> {
-	const denied = await gate(c, project);
-	if (denied) return denied;
+	const gated = await gate(c, project);
+	if (gated instanceof Response) return gated;
 
 	const req = c.req.raw;
 	const bytes = await readCapped(req.body, MAX_BODY_BYTES, req.headers.get("content-length"));
@@ -182,11 +195,14 @@ export async function handleIngest(c: Ctx, project: string): Promise<Response> {
 	if (events.length === 0) {
 		return c.json({ error: 'no valid events: "event" is required and must match [A-Za-z0-9_.:/-]{1,64}' }, 400);
 	}
+	const created = await createIfNew(c, project, gated.known);
+	if (created instanceof Response) return created;
 	const points = merge(events);
 	if (!reserve(project, points.length)) return c.json({ error: "daily limit reached for this project" }, 429);
 
 	writeEvents(c.env.EVENTS, project, points);
-	return c.json({ accepted: points.length, dropped: items.length - events.length }, 202);
+	const result = { accepted: points.length, dropped: items.length - events.length };
+	return c.json(created ? { ...result, project: created } : result, 202);
 }
 
 const OTLP_JSON_HINT = { hint: "set OTEL_EXPORTER_OTLP_PROTOCOL=http/json" };
@@ -199,8 +215,8 @@ async function gunzip(raw: Uint8Array, max: number): Promise<Uint8Array | null> 
 
 /** `POST /<project>/v1/{logs,traces,metrics}`: OTLP/HTTP JSON. */
 export async function handleOtlp(c: Ctx, project: string, signal: "logs" | "traces" | "metrics"): Promise<Response> {
-	const denied = await gate(c, project);
-	if (denied) return denied;
+	const gated = await gate(c, project);
+	if (gated instanceof Response) return gated;
 
 	const req = c.req.raw;
 	if (!(req.headers.get("content-type") ?? "").toLowerCase().includes("application/json")) {
@@ -232,6 +248,11 @@ export async function handleOtlp(c: Ctx, project: string, signal: "logs" | "trac
 	// Excess is counted in merged points, so this is approximate when several records merged into one.
 	const rejected = total - events.length + (merged.length - points.length);
 
+	if (!gated.known && points.length === 0) {
+		return c.json({ error: "no valid records, so the project was not created", ...OTLP_JSON_HINT }, 400);
+	}
+	const created = await createIfNew(c, project, gated.known);
+	if (created instanceof Response) return created;
 	if (!reserve(project, points.length)) return c.json({ error: "daily limit reached for this project" }, 429);
 	writeEvents(c.env.EVENTS, project, points);
 

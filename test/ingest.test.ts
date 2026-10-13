@@ -1,7 +1,8 @@
 import { beforeEach, expect, test } from "bun:test";
 import { ensureReady } from "../src/db.ts";
-import { DAILY_CAP, IP_LIMIT, reserve, resetGuard } from "../src/guard.ts";
+import { DAILY_CAP, IP_LIMIT, NEW_PROJECTS_PER_DAY, NEW_PROJECTS_PER_IP_PER_DAY, reserve, resetGuard } from "../src/guard.ts";
 import { app } from "../src/index.ts";
+import { sha256hex } from "../src/util.ts";
 import { call, makeEnv, type TestEnv } from "./fakes.ts";
 
 beforeEach(resetGuard);
@@ -43,14 +44,114 @@ test("ingest does no D1 reads or writes once warm, because the D1 quota is share
 	expect(t.db.writes).toBe(0);
 });
 
-test("an unknown project is a 404 that writes nothing and costs no D1 read", async () => {
+test("a reserved or invalid slug is a 404 that writes nothing and costs no D1 call", async () => {
 	const t = await setup();
 	await warm(t);
-	const res = await post(t, "/not-a-project", { event: "run" });
-	expect(res.status).toBe(404);
-	expect(await res.json()).toHaveProperty("error");
+	for (const slug of ["api", "docs", "fonts", "_headers", "Bad_Slug", "a"]) {
+		const res = await post(t, `/${slug}`, { event: "run" });
+		expect(res.status, slug).toBe(404);
+		expect(await res.json()).toHaveProperty("error");
+	}
 	expect(t.events.points).toHaveLength(0);
-	expect(t.db.reads).toBe(0);
+	expect(t.db.reads + t.db.writes).toBe(0);
+});
+
+type Created = { accepted: number; dropped: number; project?: { slug: string; created: true; admin_token: string; page_url: string } };
+
+test("the first event to a new slug creates the project and returns its admin token once, so no signup step is needed", async () => {
+	const t = await setup();
+	const res = await post(t, "/fresh", { event: "install", id: "a" });
+	expect(res.status).toBe(202);
+	const body = (await res.json()) as Created;
+	expect(body.accepted).toBe(1);
+	expect(body.project).toEqual({
+		slug: "fresh",
+		created: true,
+		admin_token: expect.stringMatching(/^tk_[0-9a-f]{48}$/),
+		page_url: "https://telemetry.test/fresh",
+	});
+	const token = body.project?.admin_token ?? "";
+	expect(res.headers.get("x-telemetry-admin-token")).toBe(token);
+	expect(res.headers.get("cache-control")).toBe("no-store");
+	expect(t.events.points).toHaveLength(1);
+
+	const row = t.db.sqlite.query("SELECT * FROM projects WHERE slug = 'fresh'").get() as Record<string, string>;
+	expect(JSON.stringify(row)).not.toContain(token);
+	expect(row.admin_hash).toBe(await sha256hex(token));
+	expect(row.creator).toMatch(/^[0-9a-f]{16}$/);
+	expect(JSON.stringify(row)).not.toContain("203.0.113.7");
+});
+
+test("later events to a created project carry no token and cost no D1 call, so the token is shown once and ingest stays free", async () => {
+	const t = await setup();
+	await post(t, "/fresh", { event: "install" });
+	t.db.resetCounters();
+	const res = await post(t, "/fresh", { event: "ping" });
+	expect(res.status).toBe(202);
+	expect(await res.json()).toEqual({ accepted: 1, dropped: 0 });
+	expect(res.headers.get("x-telemetry-admin-token")).toBeNull();
+	expect(t.db.reads + t.db.writes).toBe(0);
+});
+
+test("a body with no valid events never creates a project, so junk requests cannot claim slugs", async () => {
+	const t = await setup();
+	await warm(t);
+	for (const body of ["{not json", [], { event: "bad name!" }]) {
+		expect((await post(t, "/fresh", body)).status).toBe(400);
+	}
+	expect(t.db.writes).toBe(0);
+	expect(t.db.sqlite.query("SELECT count(*) AS n FROM projects WHERE slug = 'fresh'").get()).toEqual({ n: 0 });
+});
+
+test(`one IP creates at most ${NEW_PROJECTS_PER_IP_PER_DAY} projects a day, and the next is refused from memory with no D1 call`, async () => {
+	const t = await setup();
+	for (let i = 0; i < NEW_PROJECTS_PER_IP_PER_DAY; i++) {
+		expect((await post(t, `/new-${i}`, { event: "install" }, { ip: "198.51.100.1" })).status).toBe(202);
+	}
+	t.db.resetCounters();
+	const res = await post(t, "/new-x", { event: "install" }, { ip: "198.51.100.1" });
+	expect(res.status).toBe(429);
+	expect(await res.json()).toEqual({ error: "new project limit reached for today" });
+	expect(t.db.reads + t.db.writes).toBe(0);
+	expect((await post(t, "/new-x", { event: "install" }, { ip: "198.51.100.2" })).status).toBe(202);
+});
+
+test("the per-IP create cap holds in D1 too, so a fresh isolate cannot be used to get around it", async () => {
+	const t = await setup();
+	for (let i = 0; i < NEW_PROJECTS_PER_IP_PER_DAY; i++) await post(t, `/new-${i}`, { event: "install" });
+	resetGuard();
+	expect((await post(t, "/new-x", { event: "install" })).status).toBe(429);
+	expect(t.db.sqlite.query("SELECT count(*) AS n FROM projects WHERE slug = 'new-x'").get()).toEqual({ n: 0 });
+	t.db.resetCounters();
+	expect((await post(t, "/new-y", { event: "install" })).status).toBe(429);
+	expect(t.db.reads + t.db.writes).toBe(0);
+});
+
+test(`at most ${NEW_PROJECTS_PER_DAY} projects are created a day in total, then new slugs are refused with no D1 call`, async () => {
+	const t = await setup();
+	const now = new Date().toISOString();
+	const insert = t.db.sqlite.prepare("INSERT INTO projects (slug, admin_hash, created_at, creator) VALUES (?, 'x', ?, ?)");
+	for (let i = 0; i < NEW_PROJECTS_PER_DAY; i++) insert.run(`bulk-${i}`, now, `creator-${i}`);
+	const res = await post(t, "/one-more", { event: "install" }, { ip: "198.51.100.1" });
+	expect(res.status).toBe(429);
+	t.db.resetCounters();
+	expect((await post(t, "/another", { event: "install" }, { ip: "198.51.100.2" })).status).toBe(429);
+	expect(t.db.reads + t.db.writes).toBe(0);
+	expect((await post(t, "/demo", { event: "run" })).status).toBe(202);
+});
+
+test("when another isolate created the slug first, the event is accepted without a token", async () => {
+	const t = await setup();
+	await warm(t);
+	t.db.sqlite.run(`INSERT INTO projects (slug, admin_hash, created_at) VALUES ('raced', 'x', '${new Date().toISOString()}')`);
+	const res = await post(t, "/raced", { event: "install" });
+	expect(res.status).toBe(202);
+	expect(await res.json()).toEqual({ accepted: 1, dropped: 0 });
+	expect(res.headers.get("x-telemetry-admin-token")).toBeNull();
+	expect(t.db.sqlite.query("SELECT admin_hash FROM projects WHERE slug = 'raced'").get()).toEqual({ admin_hash: "x" });
+	t.db.resetCounters();
+	expect((await post(t, "/raced", { event: "ping" })).status).toBe(202);
+	expect(t.db.reads + t.db.writes).toBe(0);
 });
 
 test("the raw client id, ip and user agent never reach Analytics Engine, which keeps data for 90 days", async () => {

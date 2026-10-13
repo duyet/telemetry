@@ -1,5 +1,15 @@
 import { beforeEach, expect, test } from "bun:test";
-import { checkIp, DAILY_CAP, IP_LIMIT, reserve, resetGuard } from "../src/guard.ts";
+import {
+	canCreate,
+	checkIp,
+	DAILY_CAP,
+	IP_LIMIT,
+	NEW_PROJECTS_PER_IP_PER_DAY,
+	noteCreate,
+	noteCreateRefused,
+	reserve,
+	resetGuard,
+} from "../src/guard.ts";
 
 const NOON = Date.UTC(2026, 9, 13, 12, 0, 0);
 const DAY = 86_400_000;
@@ -42,4 +52,27 @@ test("the daily cap resets when the UTC day changes", () => {
 	expect(reserve("a", 1, NOON + 11 * 3_600_000)).toBe(false);
 	expect(reserve("a", 1, NOON + 12 * 3_600_000)).toBe(true);
 	expect(reserve("a", DAILY_CAP - 1, NOON + DAY)).toBe(true);
+});
+
+test("an ip that used its daily creates is stopped in memory, other ips are not", () => {
+	for (let i = 0; i < NEW_PROJECTS_PER_IP_PER_DAY; i++) {
+		expect(canCreate("1.1.1.1", NOON)).toBe(true);
+		noteCreate("1.1.1.1", NOON);
+	}
+	expect(canCreate("1.1.1.1", NOON)).toBe(false);
+	expect(canCreate("2.2.2.2", NOON)).toBe(true);
+});
+
+test("a refusal from D1 is remembered, so retries stop reaching D1 for the rest of the day", () => {
+	noteCreateRefused("1.1.1.1", false, NOON);
+	expect(canCreate("1.1.1.1", NOON)).toBe(false);
+	expect(canCreate("2.2.2.2", NOON)).toBe(true);
+	noteCreateRefused("2.2.2.2", true, NOON);
+	expect(canCreate("3.3.3.3", NOON)).toBe(false);
+});
+
+test("create caps reset when the UTC day changes", () => {
+	noteCreateRefused("1.1.1.1", true, NOON);
+	expect(canCreate("1.1.1.1", NOON + 11 * 3_600_000)).toBe(false);
+	expect(canCreate("1.1.1.1", NOON + 12 * 3_600_000)).toBe(true);
 });
