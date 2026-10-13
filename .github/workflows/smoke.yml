@@ -1,0 +1,21 @@
+name: smoke
+
+# Runs scripts/smoke.sh against a live deployment from a fresh runner IP.
+# A developer machine hits the 3-new-projects-per-IP-per-day cap after a few runs.
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Deployment base URL
+        default: https://telemetry.anyr.workers.dev
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/smoke.sh "${{ inputs.base }}"
