@@ -97,7 +97,12 @@ To check a deployment: `scripts/smoke.sh <base-url>`.
 | Analytics Engine retention | 3 months | Raw events. |
 | D1 | 100,000 rows written per day, per account | Rollups only: about 1 row per active project per day. |
 
-Measured numbers: TBD after deploy.
+Measured on the live deployment (2026-10-13):
+
+- 100 events from 50 installs: D1 row count and file size did not change. Ingest writes only to Analytics Engine.
+- A daily rollup runs 18 Analytics Engine queries in total, whatever the number of projects. It writes one D1 row per project active in the last 30 days.
+- The project page with 365 days of data is about 11 KB over the wire (brotli), 44 KB uncompressed.
+- The live "today" count matched raw Analytics Engine exactly: 3 users, 9 events.
 
 ## Privacy
 
