@@ -81,10 +81,21 @@ describe("agent-facing docs carry the exact project endpoint", () => {
 		expect(prompt).toContain("DO_NOT_TRACK");
 	});
 
-	test("agents.md tells the agent to create a project, then follow install.md", () => {
+	test("agents.md creates the project with a first curl event and says to save the token, then follow install.md", () => {
 		const md = agentsMd(BASE);
-		expect(md).toContain(`POST ${BASE}/api/projects`);
+		expect(md).toContain(`-X POST ${BASE}/<slug>`);
+		expect(md).toContain("admin_token");
+		expect(md).toContain("x-telemetry-admin-token");
+		expect(md).toContain("Never commit it");
 		expect(md).toContain(`${BASE}/<slug>/install.md`);
+	});
+
+	// The create endpoint is gone. An agent that follows stale docs gets a 404 and no project.
+	test("no doc tells anyone to call the removed create endpoint", () => {
+		for (const doc of [apiMd(BASE), agentsMd(BASE), llmsTxt(BASE), installMd(BASE, PROJECT)]) {
+			expect(doc).not.toContain(`POST ${BASE}/api/projects`);
+			expect(doc).not.toMatch(/-X POST \S*\/api\/projects/);
+		}
 	});
 });
 
@@ -182,6 +193,14 @@ describe("llms.txt", () => {
 			"/api/projects",
 			"?days=7|30|90|365",
 			"/import",
+			"x-telemetry-admin-token",
+			"new project limit reached for today",
+			"3 new projects per IP and 100 in total per UTC day",
+			"-X PATCH",
+			"/token",
+			"The slug cannot change",
+			"scripts/reset-token.ts",
+			"only projects with daily rollups in the last 30 days",
 		]) {
 			expect(md, needle).toContain(needle);
 		}

@@ -24,10 +24,10 @@ src/types.ts           Shared contracts: events, Project, Dims, DailyRow, Stats,
 src/util.ts            Slug rules, reserved slugs, sha256, UTC day helpers
 src/db.ts              Self-applied schema, salt, isolate project cache
 src/ae.ts              AE blob layout, writeDataPoint and SQL wrappers
-src/guard.ts           In-memory IP limiter and per-project daily cap
-src/ingest.ts          POST /<project>: validate, normalize, hash id, write to AE
+src/guard.ts           In-memory IP limiter, per-project daily cap, new-project caps
+src/ingest.ts          POST /<project>: validate, normalize, hash id, auto-create, write to AE
 src/otlp.ts            OTLP/HTTP JSON to events
-src/projects.ts        Create, list, delete, import, manual rollup, admin token
+src/projects.ts        Auto-create, registry, update, token rotation, delete, import, manual rollup
 src/rollup.ts          Cron: AE SQL to one daily row per project
 src/stats.ts           Stats JSON from D1 rollups plus live today
 src/pages/             Server-rendered Hono JSX: layout, landing, project, docs, SVG charts
@@ -35,6 +35,7 @@ src/docs/content.ts    All docs text: API reference, install.md playbook, snippe
 src/notes.ts           Re-exports agentsMd, installMd, llmsTxt for the router
 scripts/import.ts      Raw NDJSON to exact rollups, upload to /api/<project>/import
 scripts/import-chmonitor.ts  One-off, read-only export of the old chmonitor D1
+scripts/reset-token.ts Operator tool: new admin token for a project, prints the D1 command
 scripts/smoke.sh       curl checks against a deployment
 skills/add-telemetry/  Claude Code skill that mirrors the install.md playbook
 test/                  bun test, one file per module; fakes.ts has the D1 and AE fakes
@@ -42,7 +43,9 @@ test/                  bun test, one file per module; fakes.ts has the D1 and AE
 
 ## Invariants
 
-- Ingest never writes D1. The project-exists check uses isolate memory, refreshed from D1 every 5 minutes. A test must fail if an ingest request issues a D1 write.
+- Ingest to a known project never touches D1. The project-exists check uses isolate memory, refreshed from D1 every 5 minutes. A test must fail if such a request issues a D1 call.
+- The first valid event to a new slug creates the project with one conditional INSERT that enforces the daily caps. The in-memory caps in `src/guard.ts` stop spam before it reaches D1.
+- The admin token is returned once and only its sha256 is stored. Every admin route checks it with `requireAdmin`. The slug never changes, because AE rows are keyed by it.
 - Never store the raw id, the IP or the user agent. `uid = sha256(salt | project | id)[:16]`. Without an id the hash is `sha256(salt | day | project | ip | ua)[:16]`.
 - The AE blob layout lives in `src/ae.ts` only. Rollup and stats refer to it through `BLOB` and `PROP_BLOBS`.
 - D1 allows 100 bound parameters per statement and 50 queries per invocation. Chunk multi-row writes and prefer `db.batch`.

@@ -27,24 +27,20 @@ Base URL: \`${base}\`
 
 ## Quickstart
 
-1. Create a project. The response has an admin token. It is shown once, so save it.
-
-~~~sh
-curl -X POST ${base}/api/projects \\
-  -H 'content-type: application/json' \\
-  -d '{"slug":"${EXAMPLE_PROJECT}","name":"My Tool","homepage":"https://example.com"}'
-~~~
-
-2. Send an event.
+1. Pick a slug and send the first event with curl. A new slug is created by its first valid event. There is no signup step.
 
 ~~~sh
 curl -X POST ${base}/${EXAMPLE_PROJECT} \\
   -H 'content-type: application/json' \\
   -d '{"event":"ping","id":"3f2c9a7e-1d4b-4c8e-9a52-7b1e0d6f4a21","version":"1.0.0","os":"linux","arch":"x64"}'
-# {"accepted":1,"dropped":0}
+# {"accepted":1,"dropped":0,"project":{"slug":"${EXAMPLE_PROJECT}","created":true,"admin_token":"tk_...","page_url":"${base}/${EXAMPLE_PROJECT}"}}
 ~~~
 
-3. See it. Open \`${base}/${EXAMPLE_PROJECT}\`, or read the JSON:
+2. Save \`admin_token\` from that response. It is shown once. You need it to rename the project, rotate the token, import or delete.
+
+3. Send more events the same way. Later responses are \`{"accepted":1,"dropped":0}\`, with no token.
+
+4. See it. Open \`${base}/${EXAMPLE_PROJECT}\`, or read the JSON:
 
 ~~~sh
 curl ${base}/api/${EXAMPLE_PROJECT}/stats
@@ -83,11 +79,11 @@ Responses:
 
 | Status | Meaning |
 |---|---|
-| 202 | Accepted. Body is \`{"accepted": <number>, "dropped": <number>}\`. |
+| 202 | Accepted. Body is \`{"accepted": <number>, "dropped": <number>}\`. When this request created the project, the body also has \`project\` and the token is in the \`x-telemetry-admin-token\` header. See Projects below. |
 | 400 | Body is not valid JSON, is not an object or array, has more than 25 events, or has no valid events. |
-| 404 | Unknown project. A project created in the last 30 seconds may answer 404 from another Worker instance. |
+| 404 | Invalid or reserved slug. |
 | 413 | Body is larger than 16 KB. |
-| 429 | Per-IP rate limit (with a \`Retry-After\` header in seconds), or the project's daily cap. Do not retry in a loop. |
+| 429 | Per-IP rate limit (with a \`Retry-After\` header in seconds), the project's daily cap, or the new project limit. Do not retry in a loop. |
 
 CORS is open (\`access-control-allow-origin: *\`), so browsers can send events directly.
 
@@ -115,6 +111,7 @@ SDKs append \`/v1/logs\`, \`/v1/traces\` and \`/v1/metrics\` to the endpoint. Yo
 - Protobuf bodies (any content type other than \`application/json\`) get 415. Set \`OTEL_EXPORTER_OTLP_PROTOCOL=http/json\`.
 - gzip bodies (\`content-encoding: gzip\`) are accepted. Other encodings get 415. A body over 256 KB, or over 1 MB after unzip, gets 413.
 - At most 250 points per request. The success response is \`{}\`, or \`{"partialSuccess": {...}}\` when records were rejected (invalid event name, empty metric, or over the 250 limit).
+- The first export with at least one valid record creates a new project. The admin token is only in the \`x-telemetry-admin-token\` response header, and exporters drop it. Create the project with one curl first (see Quickstart), then point the exporter at it. An export with no valid records to an unknown slug gets 400 and creates nothing.
 
 How OTLP data maps to an event:
 
@@ -151,38 +148,54 @@ Follow these in every client. They are what makes telemetry safe to ship.
 
 Ready-made snippets for curl, shell, TypeScript, Rust, Go, Python and the browser are on each project page, and in \`${base}/<project>/install.md\`.
 
-## Projects API
+## Projects
 
-List projects:
+A project is created by its first valid event, native or OTLP. There is no signup step.
+
+- The slug matches \`^[a-z0-9][a-z0-9-]{1,38}$\` and is not a reserved word (\`api\`, \`docs\`, \`fonts\`, \`health\`, \`llms.txt\`, and similar). Other slugs get 404.
+- A request with no valid events never creates a project.
+- At most 3 new projects per IP and 100 in total per UTC day. Over either cap, the request gets 429 \`{"error": "new project limit reached for today"}\` and nothing is stored. Existing projects are not affected.
+- The response that creates the project carries the admin token, once: in the native body as \`project.admin_token\`, and in the \`x-telemetry-admin-token\` header for native and OTLP. Only its hash is stored. It cannot be shown again.
+- Save the token from your first curl. If the first event comes from a client that ignores responses, such as a shipped app or an OTLP exporter, the token is lost.
+- When two requests create the same slug at the same moment, one gets the token and the other is accepted without it.
+
+List the public projects:
 
 ~~~sh
 curl ${base}/api/projects
 ~~~
 
-Create a project: \`POST ${base}/api/projects\`
+The response is \`{"projects": [...]}\`. It lists only projects with daily rollups in the last 30 days. Each entry has \`slug\`, \`name\`, \`description\`, \`homepage\`, \`created_at\`, \`series\` (daily users for the last 30 closed UTC days, oldest first) and \`dau\` (yesterday's daily users). A new project shows up after its first nightly rollup at 00:10 UTC. Its page at \`${base}/<project>\` works right away.
+
+### Manage a project
+
+Every change needs the project's admin token in \`Authorization: Bearer <admin_token>\`. A missing or wrong token gets \`401\`. An unknown project gets \`404\`.
+
+Set the display name, description and homepage: \`PATCH ${base}/api/<project>\`
+
+~~~sh
+curl -X PATCH ${base}/api/${EXAMPLE_PROJECT} \\
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \\
+  -d '{"name":"My Tool","description":"A CLI that does one thing","homepage":"https://example.com"}'
+# {"project":{"slug":"${EXAMPLE_PROJECT}","name":"My Tool","description":"A CLI that does one thing","homepage":"https://example.com","created_at":"..."}}
+~~~
 
 | Field | Rules |
 |---|---|
-| \`slug\` | Required. Matches \`^[a-z0-9][a-z0-9-]{1,38}$\` and is not a reserved word (\`api\`, \`docs\`, \`health\`, \`llms.txt\`, and similar). |
-| \`name\` | Optional. At most 60 chars. |
-| \`description\` | Optional. At most 200 chars. |
-| \`homepage\` | Optional. An http(s) URL, at most 200 chars. |
+| \`name\` | At most 60 chars. |
+| \`description\` | At most 200 chars. |
+| \`homepage\` | An http(s) URL, at most 200 chars. |
 
-Response \`201\`:
+A field you leave out stays as it is. \`null\` or \`""\` clears it. A bad field gets \`400\` and changes nothing.
 
-~~~json
-{
-  "slug": "${EXAMPLE_PROJECT}",
-  "admin_token": "tk_...",
-  "page_url": "${base}/${EXAMPLE_PROJECT}",
-  "ingest_url": "${base}/${EXAMPLE_PROJECT}",
-  "otlp_endpoint": "${base}/${EXAMPLE_PROJECT}",
-  "install_md": "${base}/${EXAMPLE_PROJECT}/install.md",
-  "stats_url": "${base}/api/${EXAMPLE_PROJECT}/stats"
-}
+The slug cannot change. Raw events in Analytics Engine are stored under it. Only the display name can change. To move to a new slug, send events to the new slug.
+
+Rotate the admin token, for example after a leak. The old token stops working at once:
+
+~~~sh
+curl -X POST ${base}/api/${EXAMPLE_PROJECT}/token -H "Authorization: Bearer $ADMIN_TOKEN"
+# {"admin_token":"tk_..."}
 ~~~
-
-\`admin_token\` is shown once and cannot be recovered. Only its hash is stored. Errors: \`400\` invalid field, \`409\` slug taken, \`429\` more than 5 creates per day from one IP.
 
 Delete a project and its rollups:
 
@@ -190,7 +203,9 @@ Delete a project and its rollups:
 curl -X DELETE ${base}/api/${EXAMPLE_PROJECT} -H "Authorization: Bearer $ADMIN_TOKEN"
 ~~~
 
-Admin endpoints return \`401\` for a missing or wrong token and \`404\` for an unknown project. Raw events in Analytics Engine cannot be deleted. They expire after 90 days.
+Raw events in Analytics Engine cannot be deleted. They expire after 90 days.
+
+Lost token: there is no self-service reset, because the token is the only proof of ownership. The operator of the deployment can set a new one: \`bun scripts/reset-token.ts <project>\` prints a new token and the D1 command that stores its hash.
 
 ## Stats API
 
@@ -269,11 +284,11 @@ Use this to bring history from another system. Compute the daily aggregates loca
 | Events per request | 25 (native), 250 points (OTLP) |
 | Rate limit | 60 requests per minute per IP (best effort, per Worker instance) |
 | Daily cap | 20,000 data points per project per UTC day, then 429 |
-| Project creates | 5 per day per IP |
+| New projects | 3 per IP and 100 in total per UTC day, then 429 |
 | Raw event retention | 90 days |
 | Rollups | One row per active project per day, kept long term |
 
-The service is meant to run inside the Cloudflare free plan. Workers allows 100,000 requests per day and Analytics Engine allows 100,000 data points per day, both per account. Sending events never writes to D1.
+The service is meant to run inside the Cloudflare free plan. Workers allows 100,000 requests per day and Analytics Engine allows 100,000 data points per day, both per account. Sending events to an existing project never writes to D1. The first event of a new project writes one row.
 
 ## Self-hosting
 
@@ -854,7 +869,7 @@ export function llmsTxt(base: string): string {
 
 - [API reference](${base}/docs): sending events, OTLP, projects, stats, import, limits
 - [Agent guide](${base}/AGENTS.md): how to add telemetry to any repo, starting from no project
-- [Projects](${base}/api/projects): JSON list of registered projects
+- [Projects](${base}/api/projects): JSON list of active projects (data in the last 30 days)
 - Project install playbook: ${base}/<project>/install.md (replace <project> with the slug)
 - Project page and stats: ${base}/<project>, JSON at ${base}/api/<project>/stats
 
@@ -868,17 +883,23 @@ export function agentsMd(base: string): string {
 
 Guide for coding agents. Use it when the user asks for usage telemetry, analytics or a phone-home in a project and no telemetry project exists yet. Service: \`${base}\`.
 
-## 1. Create a project
+## 1. Create the project with its first event
 
-Pick a slug: lowercase letters, digits and \`-\`, 2 to 39 chars, usually the repo name. Create it:
+A project is created by its first valid event. There is no signup step.
+
+Pick a slug: lowercase letters, digits and \`-\`, 2 to 39 chars, usually the repo name. Check that it is free: \`curl -s -o /dev/null -w '%{http_code}' ${base}/api/<slug>/stats\` prints \`404\` for a free slug. If it prints \`200\` and the user does not own it, pick another slug.
+
+Send the first event from your shell, not from the app:
 
 ~~~sh
-curl -X POST ${base}/api/projects \\
-  -H 'content-type: application/json' \\
-  -d '{"slug":"<slug>","name":"<Name>","description":"<one line>","homepage":"<repo url>"}'
+curl -sS -X POST ${base}/<slug> -H 'content-type: application/json' -d '{"event":"ping"}'
+# {"accepted":1,"dropped":0,"project":{"slug":"<slug>","created":true,"admin_token":"tk_...","page_url":"${base}/<slug>"}}
 ~~~
 
-The response has \`admin_token\`. It is shown once. Tell the user to save it (never commit it). It is only needed for admin calls (delete, import, rollup). \`409\` means the slug is taken: pick another one. If the project already exists and the user owns it, skip this step.
+- \`project.admin_token\` is shown once. It is also in the \`x-telemetry-admin-token\` header. Tell the user to save it outside the repo, for example in \`~/.config/telemetry/<slug>.token\`. Never commit it. It is needed to rename the project, rotate the token, import, roll up or delete.
+- No \`project\` in the response means the slug already existed.
+- \`429\` with \`new project limit reached for today\` means the caps were hit (3 new projects per IP, 100 in total, per UTC day). Try again the next UTC day.
+- Optional: set a display name with \`PATCH ${base}/api/<slug>\` (see ${base}/docs). The slug itself cannot change.
 
 ## 2. Follow the project playbook
 

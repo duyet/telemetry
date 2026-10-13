@@ -11,14 +11,18 @@ In this file `BASE` is the base URL and `<project>` is the project slug.
 
 ## 1. Get a project
 
-Ask the user for the project slug. If they have none, create one (slug: lowercase letters, digits and `-`, 2 to 39 chars, usually the repo name):
+Ask the user for the project slug. If they have none, pick one (lowercase letters, digits and `-`, 2 to 39 chars, usually the repo name). The first event to a new slug creates the project.
+
+1. Check it is free: `curl -s -o /dev/null -w '%{http_code}' BASE/api/<project>/stats` prints `404` for a free slug.
+2. Send the first event from your shell, not from the app:
 
 ```sh
-curl -X POST BASE/api/projects -H 'content-type: application/json' \
-  -d '{"slug":"<project>","name":"<Name>","homepage":"<repo url>"}'
+curl -sS -X POST BASE/<project> -H 'content-type: application/json' -d '{"event":"ping"}'
 ```
 
-The response has `admin_token`. It is shown once. Tell the user to save it. Never write it into the repo. `409` means the slug is taken.
+The response has `project.admin_token` (also in the `x-telemetry-admin-token` header). It is shown once. Tell the user to save it outside the repo. Never write it into the repo. No `project` in the response means the slug already existed. `429` means the new project limit for today (3 per IP, 100 in total) was reached.
+
+Optional: set a display name with `curl -X PATCH BASE/api/<project> -H "Authorization: Bearer <token>" -H 'content-type: application/json' -d '{"name":"<Name>","homepage":"<repo url>"}'`. The slug cannot change.
 
 ## 2. Fetch the playbook
 
